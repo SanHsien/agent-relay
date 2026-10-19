@@ -90,6 +90,8 @@ class Store:
             raise StoreError(f"no message {env_id} in mailbox {agent}")
         state, path = hit
         env = envelope.loads(path.read_text(encoding="utf-8"))
+        if env["id"] != env_id or env["to"] != agent:
+            raise StoreError(f"{path.name} does not hold message {env_id} for {agent}")
         if state == "new":
             self._move(path, agent, "cur")
         return env

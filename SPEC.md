@@ -127,18 +127,32 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `runtime` | 是 | `claude`、`codex`、`agy` |
 | `repo` | 是 | 收件端機器上的 git repo 路徑，或 `asr:<會話名>` |
 | `mode` | 否 | `build`（預設，可改檔並在 worktree 分支 commit）或 `plan`（唯讀） |
-| `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度 |
+| `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
 | `timeout_minutes` | 否 | 1～120，預設 30。超時就結束整棵行程，回信 `status: timeout` |
 
 **收件端政策（config.json 的 `dispatch`，沒設就全部拒絕）**：
 
 ```json
-"dispatch": {"runtimes": ["claude", "agy"], "repo_roots": ["C:/GitHub"], "cortex_path": "C:/GitHub/agent-cortex"}
+"dispatch": {
+  "runtimes": ["claude", "agy"],
+  "repo_roots": ["C:/GitHub"],
+  "senders": ["commander"],
+  "cortex_path": "C:/GitHub/agent-cortex",
+  "executables": {"claude": "%USERPROFILE%/.local/bin/claude.exe"},
+  "claude_allowed_tools": ["Bash(git add *)", "Bash(git commit *)", "Bash(python -m unittest *)"]
+}
 ```
 
-- runtime 不在 `runtimes`、或 repo 不在 `repo_roots` 底下 → 不執行，回一封 `status: refused` 說明原因。
+- runtime 不在 `runtimes`、repo 不在 `repo_roots` 底下、或設了 `senders` 而寄件者不在名單 → 不執行，回一封 `status: refused` 說明原因。
+- **只執行真正的 `.exe`**：先找 `executables` 指定的路徑，沒設就找 PATH 上的 `<runtime>.exe`。`.bat`／`.cmd` 外殼一律拒絕：cmd.exe 會重新解析參數，把 prompt 第一個換行之後的內容連同權限旗標一起丟掉，工人就會用使用者的預設權限跑（實際踩過）。
+- claude、codex 的 prompt 從 **stdin** 傳，不放命令列（避開 32K 長度上限與換行問題）。
+- claude 的 build 工人除了改檔，只放行 `claude_allowed_tools`（預設：`git add/commit/status/diff/log` 與 `python -m unittest`／`pytest`），讓它能跑測試、能 commit。
 - 工人只在 worktree 的 `relay/<id>` 分支改檔與 commit，**不 push、不動主工作目錄**。要不要合併，由收信的指揮者看結果再決定。
 - 指令由 [agent-cortex](https://github.com/SanHsien/agent-cortex) 的 launcher 組（設了 `cortex_path` 或能 import 時），沿用它加固過的權限模式：claude `acceptEdits`（plan 模式 `plan`）、codex `workspace-write` 沙箱（plan 模式 `read-only`）、agy 一律 `plan + sandbox`。cortex 載不到就用同樣保守的內建版本。**不會**使用 `bypassPermissions` 或 `--dangerously-*` 旗標。
-- 回信內文：狀態與 exit code、runtime、worktree 與分支、耗時、工人最後回報、commit 清單與 `diff --stat`。
+- 回信內文：狀態與 exit code、runtime、worktree 與分支、耗時、工人最後回報、commit 清單與 `diff --stat`。常見的 token 形狀（`sk-`、`ghp_`、`AKIA`、Bearer 等）會遮成 `[REDACTED]`，因為回信會進 git 歷史。
+- **每次派工都一定回一封信並 ack**：`ok`、`failed`、`timeout`、`refused`、`error`（未預期的例外）、`interrupted`。
+- **中斷補救**：開跑時寫 `~/.agent-relay/runs/<id>/state.json`（含期限 = 逾時 + 10 分鐘）。分頁被關、當機或重開機時，信會停在 `cur/`；下一輪 `watch` 看到期限已過、還沒回信，就補一封 `status: interrupted` 並 ack。
+- 已 `done` 的信不會再派；要重跑加 `relay dispatch <id> --force`。worktree 已存在時，只沿用 git 登記為 `relay/<id>` 的那個 worktree，diff 以該分支的 merge-base 為準；路徑上若是別的資料夾就拒絕。
+- 已知範圍：commit 需要寫入 repo 共用的 `.git/objects` 與 `.git/refs/heads/relay/`，所以一個工人技術上碰得到其他 `relay/*` 分支。不要把互不信任的派工放在同一個 repo。
 
-**門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`，你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。
+**門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`（用有主控台的 `python.exe`，relay 的 home 與 store 用參數傳，不靠環境變數），你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。

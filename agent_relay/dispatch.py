@@ -7,22 +7,27 @@
                                                     → headless claude / codex / agy
                                                     → result envelope back (reply_to)
 
-The receiver decides what may run: `dispatch.repo_roots` and `dispatch.runtimes`
-in config.json. Mail only names a repo and a runtime inside that policy. The
-worker commits on its own branch in its own worktree and never pushes; merging is
-left to whoever reviews the result.
+The receiver decides what may run: `dispatch.runtimes`, `dispatch.repo_roots` and
+(optionally) `dispatch.senders` in config.json. Mail only names a repo and a
+runtime inside that policy. The worker commits on its own branch in its own
+worktree and never pushes; merging is left to whoever reviews the result.
 
 Command lines come from agent-cortex's launcher (SanHsien/agent-cortex,
 paulsha_cortex/coordinator/launcher.py) when it can be imported, so permission
 modes stay the ones cortex already hardened; the fallback builders below keep
 the same conservative defaults (claude acceptEdits, codex workspace-write sandbox,
 agy plan + sandbox).
+
+Every run ends in exactly one result envelope and an ack, whatever goes wrong.
+A run that dies without replying (tab closed, reboot) is found by `watch` through
+its lease in runs/<id>/state.json and answered with `status: interrupted`.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,10 +39,27 @@ from .store import Store
 
 RUNTIMES = ("claude", "codex", "agy")
 MODES = ("build", "plan")
+EFFORTS = ("low", "medium", "high", "xhigh")
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 DEFAULT_TIMEOUT_MIN = 30
 MAX_TIMEOUT_MIN = 120
+LEASE_GRACE_S = 600
 WORKTREE_DIR = ".relay-worktrees"
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+DETACHED_PROCESS, NEW_PROCESS_GROUP, BREAKAWAY_FROM_JOB = 0x00000008, 0x00000200, 0x01000000
+
+# What a claude build worker may run besides editing files: commit its work and run tests.
+DEFAULT_CLAUDE_TOOLS = (
+    "Bash(git add *)", "Bash(git commit *)", "Bash(git status)", "Bash(git status *)",
+    "Bash(git diff)", "Bash(git diff *)", "Bash(git log *)",
+    "Bash(python -m unittest)", "Bash(python -m unittest *)", "Bash(python -m pytest *)",
+)
+
+# Rough shapes of common secrets; worker output goes into git history via the reply.
+SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|(?i:bearer)\s+[A-Za-z0-9._-]{20,}|\d{8,10}:[A-Za-z0-9_-]{30,})"
+)
 
 
 class DispatchError(RuntimeError):
@@ -55,19 +77,25 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError(f"dispatch.runtime must be one of {RUNTIMES}")
     if not isinstance(spec.get("repo"), str) or not spec["repo"].strip():
         raise envelope.EnvelopeError("dispatch.repo is required")
+    if any(ch in spec["repo"] for ch in (chr(10), chr(13))):
+        raise envelope.EnvelopeError("dispatch.repo must be one line")
     if spec.get("mode", "build") not in MODES:
         raise envelope.EnvelopeError(f"dispatch.mode must be one of {MODES}")
     timeout = spec.get("timeout_minutes", DEFAULT_TIMEOUT_MIN)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= MAX_TIMEOUT_MIN:
         raise envelope.EnvelopeError(f"dispatch.timeout_minutes must be 1..{MAX_TIMEOUT_MIN}")
-    for key in ("model", "effort", "repo"):
-        if key in spec and any(ch in str(spec[key]) for ch in (chr(10), chr(13))):
-            raise envelope.EnvelopeError(f"dispatch.{key} must be one line")
+    if "model" in spec and not MODEL_RE.fullmatch(str(spec["model"])):
+        raise envelope.EnvelopeError("dispatch.model must look like a model id")
+    if "effort" in spec and spec["effort"] not in EFFORTS:
+        raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
     return spec
 
 
-def policy_check(spec: dict, policy: dict) -> Path:
+def policy_check(env: dict, spec: dict, policy: dict) -> Path:
     """Return the resolved repo, or raise when the receiver has not allowed this."""
+    senders = policy.get("senders")
+    if senders is not None and env["from"] not in senders:
+        raise DispatchError(f"sender {env['from']!r} not in dispatch.senders {senders}")
     allowed = policy.get("runtimes") or []
     if spec["runtime"] not in allowed:
         raise DispatchError(f"runtime {spec['runtime']!r} not in this machine's dispatch.runtimes {allowed}")
@@ -104,13 +132,30 @@ def _exclude(repo: Path) -> None:
             fh.write(f"\n/{WORKTREE_DIR}/\n")
 
 
+def _registered_branch(repo: Path, path: Path) -> str | None:
+    """The branch checked out at `path` if git knows it as a worktree of `repo`."""
+    current: Path | None = None
+    for line in _git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            current = Path(line[len("worktree "):].strip()).resolve()
+        elif line.startswith("branch ") and current == path.resolve():
+            return line[len("branch "):].strip().removeprefix("refs/heads/")
+    return None
+
+
 def make_worktree(repo: Path, env_id: str) -> tuple[Path, str, str]:
     """Create <repo>/.relay-worktrees/<id> on branch relay/<id>. Returns (path, branch, base)."""
-    base = _git(repo, "rev-parse", "HEAD").strip()
     branch = f"relay/{env_id}"
     path = repo / WORKTREE_DIR / env_id
     _exclude(repo)
-    if not path.exists():
+    if path.exists():
+        # Only reuse what is provably our own worktree; a stray folder would put the
+        # worker inside the main checkout.
+        if _registered_branch(repo, path) != branch:
+            raise DispatchError(f"{path} exists but is not the {branch} worktree")
+        base = _git(repo, "merge-base", "HEAD", branch).strip()
+    else:
+        base = _git(repo, "rev-parse", "HEAD").strip()
         _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), base)
     return path, branch, base
 
@@ -129,11 +174,24 @@ def _cortex_launcher(cfg: dict):
     return launcher
 
 
+def _git_write_dirs(worktree: Path) -> list[str]:
+    """Outside-the-worktree git paths a branch commit writes (same set cortex allows)."""
+    common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    own = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
+    return [str(own), str(common / "objects"), str(common / "refs" / "heads" / "relay"),
+            str(common / "logs" / "refs" / "heads" / "relay")]
+
+
 def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: Path,
-               cfg: dict) -> tuple[list[str], str]:
-    """Return (argv, source) where source says which builder made it."""
+               cfg: dict) -> tuple[list[str], str, str | None]:
+    """Return (argv, source, stdin_text).
+
+    claude and codex take the prompt on stdin: Windows command lines are capped
+    (32K) and a .cmd shim would cut the prompt at its first newline.
+    """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
     model = spec.get("model")
+    tools = list((cfg.get("dispatch") or {}).get("claude_allowed_tools") or DEFAULT_CLAUDE_TOOLS)
     launcher = _cortex_launcher(cfg)
     if launcher is not None:
         common = {"prompt": prompt, "slice_id": slice_id, "log_dir": str(log_dir), "model": model}
@@ -141,23 +199,43 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
             argv = launcher.build_claude_argv(worktree=str(worktree), read_only=plan,
                                               commit_required=not plan, **common)
             # cortex enables Remote Control for its own monitor; a relay run has no use for it.
-            return [a for a in argv if a != "--remote-control"], "agent-cortex"
+            argv = [a for a in argv if a != "--remote-control"]
+            if not plan:
+                argv += ["--allowedTools", *tools]
+            return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
         if runtime == "codex":
-            return launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
-                                             commit_required=not plan, effort=spec.get("effort"),
-                                             **common), "agent-cortex"
-        return launcher.build_agy_argv(**common), "agent-cortex"
+            argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
+                                             commit_required=not plan, effort=spec.get("effort"), **common)
+            return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
+        return launcher.build_agy_argv(**common), "agent-cortex", None
     if runtime == "claude":
-        argv = ["claude", "-p", prompt, "--output-format", "json",
+        argv = ["claude", "-p", "--output-format", "json",
                 "--permission-mode", "plan" if plan else "acceptEdits", "--add-dir", str(worktree)]
+        if not plan:
+            for extra in _git_write_dirs(worktree):
+                argv += ["--add-dir", extra]
+            argv += ["--allowedTools", *tools]
+        stdin = prompt
     elif runtime == "codex":
-        argv = ["codex", "exec", prompt, "--json", "--sandbox", "read-only" if plan else "workspace-write",
+        argv = ["codex", "exec", "--json", "--sandbox", "read-only" if plan else "workspace-write",
                 "-C", str(worktree)]
+        if not plan:
+            for extra in _git_write_dirs(worktree):
+                argv += ["--add-dir", extra]
+        if spec.get("effort"):
+            argv += ["-c", f"model_reasoning_effort={json.dumps(spec['effort'])}"]
+        stdin = prompt
     else:
-        argv = ["agy", "--print", prompt, "--mode", "plan", "--sandbox"]
+        argv, stdin = ["agy", "--print", prompt, "--mode", "plan", "--sandbox"], None
     if model:
         argv += ["--model", model]
-    return argv, "built-in"
+    return argv, "built-in", stdin
+
+
+def _prompt_to_stdin(argv: list[str], prompt: str) -> list[str]:
+    out = list(argv)
+    out.remove(prompt)  # the positional prompt; the CLI then reads it from stdin
+    return out
 
 
 def build_prompt(env: dict, worktree: Path, branch: str, plan: bool) -> str:
@@ -174,6 +252,20 @@ def build_prompt(env: dict, worktree: Path, branch: str, plan: bool) -> str:
     )
 
 
+def resolve_executable(name: str, cfg: dict) -> str:
+    """A real .exe for the runtime. Batch shims are refused: cmd.exe re-parses arguments."""
+    configured = ((cfg.get("dispatch") or {}).get("executables") or {}).get(name)
+    exe = os.path.expandvars(os.path.expanduser(configured)) if configured else None
+    if not exe and sys.platform == "win32":
+        exe = shutil.which(name + ".exe")
+    exe = exe or shutil.which(name)
+    if not exe or not Path(exe).is_file():
+        raise DispatchError(f"runtime {name!r} is not installed (set dispatch.executables.{name})")
+    if Path(exe).suffix.lower() in (".bat", ".cmd"):
+        raise DispatchError(f"{exe} is a batch shim; set dispatch.executables.{name} to the real .exe")
+    return exe
+
+
 # ---------------------------------------------------------------- run
 
 
@@ -184,20 +276,27 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> tuple[str, int | None]:
-    """Run with a hard timeout. Returns (status, exit code). Output goes to log_file."""
-    exe = shutil.which(argv[0])
-    if exe is None:
-        return f"not-installed: {argv[0]}", None
+def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: str | None = None) -> tuple[str, int | None]:
+    """Run argv (argv[0] already resolved) with a hard timeout. Returns (status, exit code)."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "w", encoding="utf-8", errors="replace") as log:
-        proc = subprocess.Popen([exe, *argv[1:]], cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+        proc = subprocess.Popen(argv, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                                creationflags=CREATE_NO_WINDOW)
+        if stdin_text is not None:
+            try:
+                proc.stdin.write(stdin_text.encode("utf-8"))
+                proc.stdin.close()
+            except OSError:
+                pass  # the worker exited early; its exit code says why
         try:
             code = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             _kill_tree(proc)
-            proc.wait(timeout=30)
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
             return "timeout", None
     return ("ok" if code == 0 else "failed"), code
 
@@ -226,6 +325,10 @@ def final_text(log_file: Path, limit: int = 4000) -> str:
     return text[-limit:]
 
 
+def redact(text: str) -> str:
+    return SECRET_RE.sub("[REDACTED]", text)
+
+
 def changes(worktree: Path, base: str) -> str:
     try:
         commits = _git(worktree, "log", "--oneline", f"{base}..HEAD") or "(no commits)"
@@ -236,11 +339,64 @@ def changes(worktree: Path, base: str) -> str:
     return f"commits:\n{commits}\n\ndiff --stat {base[:10]}:\n{stat}\n\nuncommitted:\n{dirty}"
 
 
-def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True) -> dict:
-    """Run one task and send the result envelope. Worker failures become a result, not an exception."""
+# ---------------------------------------------------------------- lease
+
+
+def _state_path(env_id: str) -> Path:
+    return config.home() / "runs" / env_id / "state.json"
+
+
+def write_state(env_id: str, **fields) -> None:
+    path = _state_path(env_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(fields), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_state(env_id: str) -> dict | None:
+    try:
+        return json.loads(_state_path(env_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _reply(store: Store, agent: str, env: dict, status: str, body: str) -> dict:
+    reply = envelope.build(sender=agent, to=env["from"], subject=f"{status}: {env['subject']}"[:200],
+                           body=redact(body), kind="result", reply_to=env["id"], thread=env.get("thread"),
+                           priority="normal" if status == "ok" else "high")
+    store.deliver(reply)
+    store.ack(agent, env["id"])
+    write_state(env["id"], phase="replied", status=status, reply_id=reply["id"], finished=time.time())
+    return reply
+
+
+def _sync(cfg: dict, message: str) -> None:
+    for _ in range(2):  # a scheduled watch may hold index.lock for a moment
+        try:
+            gitsync.sync(Path(cfg["store"]), message)
+            return
+        except gitsync.SyncError as exc:
+            doorbell._log(f"dispatch sync failed: {exc}")
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------- main entry
+
+
+def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool = False) -> dict:
+    """Run one task and send the result envelope. Every outcome ends in one reply and an ack."""
     store = Store(cfg["store"])
     if sync:
-        gitsync.pull(Path(cfg["store"]))
+        try:
+            gitsync.pull(Path(cfg["store"]))
+        except gitsync.SyncError as exc:  # work from the local copy; the reply syncs later
+            doorbell._log(f"dispatch pull failed: {exc}")
+    hit = store.find(agent, env_id)
+    if hit is None:
+        raise DispatchError(f"no message {env_id} in mailbox {agent}")
+    if hit[0] == "done" and not force:
+        raise DispatchError(f"{env_id} is already done; pass --force to run it again")
     env = store.read(agent, env_id)
     run_dir = config.home() / "runs" / env_id
     report: dict = {"id": env_id, "status": "refused"}
@@ -248,14 +404,17 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True) -> dict:
         if env["kind"] != "task" or "dispatch" not in env:
             raise DispatchError("not a task with a dispatch section")
         spec = validate_spec(env["dispatch"])
-        repo = policy_check(spec, cfg.get("dispatch") or {})
+        timeout_s = spec.get("timeout_minutes", DEFAULT_TIMEOUT_MIN) * 60
+        write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
+                    deadline=time.time() + timeout_s + LEASE_GRACE_S)
+        repo = policy_check(env, spec, cfg.get("dispatch") or {})
         plan = spec.get("mode", "build") == "plan"
         worktree, branch, base = make_worktree(repo, env_id)
-        argv, source = build_argv(spec, build_prompt(env, worktree, branch, plan), f"relay-{env_id}",
-                                  run_dir, worktree, cfg)
+        argv, source, stdin_text = build_argv(spec, build_prompt(env, worktree, branch, plan),
+                                              f"relay-{env_id}", run_dir, worktree, cfg)
+        argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
         started = time.monotonic()
-        timeout_s = spec.get("timeout_minutes", DEFAULT_TIMEOUT_MIN) * 60
-        status, code = run(argv, worktree, run_dir / "output.log", timeout_s)
+        status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source,
                       worktree=str(worktree), branch=branch, seconds=round(time.monotonic() - started),
                       log=str(run_dir / "output.log"))
@@ -269,39 +428,67 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True) -> dict:
     except (DispatchError, envelope.EnvelopeError, FileNotFoundError, PermissionError) as exc:
         report["error"] = str(exc)
         body = f"status: refused\n原因: {exc}\n"
-    title = f"{report['status']}: {env['subject']}"[:200]
-    reply = envelope.build(sender=agent, to=env["from"], subject=title, body=body, kind="result",
-                           reply_to=env["id"], thread=env.get("thread"),
-                           priority="normal" if report["status"] == "ok" else "high")
-    store.deliver(reply)
-    store.ack(agent, env_id)
+    except Exception as exc:  # anything else still owes the sender an answer
+        report.update(status="error", error=f"{type(exc).__name__}: {exc}")
+        body = f"status: error\n原因: {type(exc).__name__}: {exc}\n"
+    report["reply_id"] = _reply(store, agent, env, report["status"], body)["id"]
     if sync:
-        gitsync.sync(Path(cfg["store"]), f"relay: {agent} dispatch {env_id} -> {report['status']}")
-    report["reply_id"] = reply["id"]
+        _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")
     return report
 
 
+def reap_interrupted(agent: str, cfg: dict, now: float | None = None) -> list[str]:
+    """Answer dispatch tasks whose run died: still in cur/, lease expired, never replied."""
+    store = Store(cfg["store"])
+    now = now or time.time()
+    reaped = []
+    for state, env in store.list(agent, ("cur",)):
+        if env["kind"] != "task" or "dispatch" not in env:
+            continue
+        lease = read_state(env["id"])
+        if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline", now + 1)):
+            continue
+        body = (f"status: interrupted\n派工在 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(lease.get('started', 0)))} "
+                f"開始，超過期限仍未回報（分頁被關、當機或重開機）。worktree 若已建立會保留在原處。\n")
+        _reply(store, agent, env, "interrupted", body)
+        reaped.append(env["id"])
+    return reaped
+
+
 # ---------------------------------------------------------------- doorbell
+
+
+def _console_python() -> str:
+    """The scheduled task runs pythonw.exe; a visible tab needs the console python.exe."""
+    exe = Path(sys.executable)
+    console = exe.with_name("python.exe")
+    return str(console if exe.name.lower() == "pythonw.exe" and console.is_file() else exe)
 
 
 def ring_dispatch(env: dict, bell: dict) -> str:
     """Doorbell: start `relay dispatch <id>` in its own Windows Terminal tab (or detached).
 
     The scheduled watch task has a 10-minute limit, so the run must not live
-    inside it. It is handed to Windows Terminal (a visible session the owner can
-    watch) or, without wt.exe, started as a detached process.
+    inside it. A Windows Terminal tab may be created by an already running wt
+    process that does not inherit our environment, so the relay home and store
+    are passed as arguments, not environment variables.
     """
     if env["kind"] != "task" or "dispatch" not in env:
         return "skipped: no dispatch section"
-    cmd = [sys.executable, "-m", "agent_relay", "dispatch", env["id"], "--agent", env["to"]]
+    cmd = [_console_python(), "-m", "agent_relay", "dispatch", env["id"], "--agent", env["to"],
+           "--home", str(config.home())]
+    if os.environ.get("AGENT_RELAY_STORE"):
+        cmd += ["--store", os.environ["AGENT_RELAY_STORE"]]
     workdir = str(Path(__file__).resolve().parent.parent)
-    child_env = {**os.environ, "PYTHONPATH": workdir}
     wt = shutil.which("wt.exe") if bell.get("window", True) else None
     if wt:
         subprocess.Popen([wt, "-w", "0", "new-tab", "--title", f"relay {env['id'][-6:]}", "-d", workdir, *cmd],
-                         env=child_env, creationflags=CREATE_NO_WINDOW)
+                         creationflags=CREATE_NO_WINDOW)
         return "ok: Windows Terminal tab"
-    flags = (0x00000008 | 0x00000200) if sys.platform == "win32" else 0  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-    subprocess.Popen(cmd, cwd=workdir, env=child_env, creationflags=flags,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    flags = DETACHED_PROCESS | NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    kwargs = {"cwd": workdir, "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    try:  # leave the scheduler's job object so the run survives the watch task
+        subprocess.Popen(cmd, creationflags=flags | (BREAKAWAY_FROM_JOB if flags else 0), **kwargs)
+    except OSError:
+        subprocess.Popen(cmd, creationflags=flags, **kwargs)
     return "ok: detached process"

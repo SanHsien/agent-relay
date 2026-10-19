@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -66,7 +67,7 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
 
 
 def cmd_dispatch(args, cfg) -> int:
-    report = dispatcher.dispatch(args.id, _agent(args, cfg), cfg, sync=not args.no_sync)
+    report = dispatcher.dispatch(args.id, _agent(args, cfg), cfg, sync=not args.no_sync, force=args.force)
     text = chr(10).join(f"{k}: {v}" for k, v in report.items())
     _out(args, report, text)
     return 0 if report["status"] == "ok" else 4
@@ -158,6 +159,8 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     """Ring for every message in new/ that this machine has not rung yet."""
     if sync:
         gitsync.pull(Path(cfg["store"]))
+    for env_id in dispatcher.reap_interrupted(agent, cfg):
+        doorbell._log(f"dispatch {env_id} interrupted: answered with status interrupted")
     rung = doorbell.load_rung(agent)
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
     report = []
@@ -230,6 +233,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("dispatch", help="run a dispatch task in a worktree and reply with the result")
     s.add_argument("id")
     s.add_argument("--agent")
+    s.add_argument("--home", help="relay home folder (the doorbell passes it; a new tab may not inherit env)")
+    s.add_argument("--store", help="store folder override")
+    s.add_argument("--force", action="store_true", help="run a task that is already done")
     s.set_defaults(func=cmd_dispatch)
 
     for name, func, helptext in (("read", cmd_read, "show a message and mark it read"), ("ack", cmd_ack, "mark done")):
@@ -268,9 +274,12 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    for attr, var in (("home", "AGENT_RELAY_HOME"), ("store", "AGENT_RELAY_STORE")):
+        if getattr(args, attr, None):
+            os.environ[var] = getattr(args, attr)
     cfg = config.load()
     try:
         return args.func(args, cfg)
-    except (StoreError, envelope.EnvelopeError, gitsync.SyncError, OSError) as exc:
+    except (StoreError, envelope.EnvelopeError, gitsync.SyncError, dispatcher.DispatchError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
