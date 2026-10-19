@@ -45,7 +45,7 @@ def cmd_init(args, cfg) -> int:
     path = home / "config.json"
     current = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     current.update({"store": str(store), "agent": args.agent})
-    current.setdefault("doorbells", [{"type": "toast"}, {"type": "handoff"}])
+    current.setdefault("doorbells", [{"type": "toast"}, {"type": "handoff", "project_roots": []}])
     path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"config: {path}\nstore:  {store}\nagent:  {args.agent}")
     return 0
@@ -55,22 +55,36 @@ def cmd_send(args, cfg) -> int:
     body = args.body
     if args.body_file:
         body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
+    sender = _agent(args, cfg, "sender")
+    store = Store(cfg["store"])
+    if not args.no_sync:
+        gitsync.pull(Path(cfg["store"]))
+    thread = args.thread
+    if args.reply_to and not thread:
+        # A reply joins the original's thread, so a reply to a reply keeps the chain.
+        hit = store.find(sender, args.reply_to)
+        if hit is not None:
+            thread = envelope.loads(hit[1].read_text(encoding="utf-8")).get("thread")
     env = envelope.build(
-        sender=_agent(args, cfg, "sender"),
+        sender=sender,
         to=args.to,
         subject=args.subject,
         body=body or "",
         kind=args.kind,
         priority=args.priority,
         reply_to=args.reply_to,
+        thread=thread,
         project=args.project,
         refs=args.ref,
     )
-    store = Store(cfg["store"])
-    if not args.no_sync:
-        gitsync.pull(Path(cfg["store"]))
     path = store.deliver(env)
-    _sync(args, cfg, f"relay: {env['from']} -> {env['to']} {env['id']}")
+    try:
+        _sync(args, cfg, f"relay: {env['from']} -> {env['to']} {env['id']}")
+    except gitsync.SyncError as exc:
+        # Already committed locally; the next sync pushes it. Re-sending would duplicate it.
+        _out(args, {"id": env["id"], "path": str(path), "queued": True, "error": str(exc)},
+             f"queued {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
+        return 3
     _out(args, {"id": env["id"], "path": str(path)}, f"sent {env['id']} -> {env['to']}")
     return 0
 
@@ -128,8 +142,7 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     for env in fresh:
         report.append({"id": env["id"], "subject": env["subject"], "bells": doorbell.ring(env, cfg["doorbells"])})
         rung.append(env["id"])
-    if fresh:
-        doorbell.save_rung(agent, rung)
+        doorbell.save_rung(agent, rung)  # per message: a run cut short does not re-ring the rest
     return report
 
 
@@ -180,6 +193,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--kind", default="note", choices=envelope.KINDS)
     s.add_argument("--priority", default="normal", choices=envelope.PRIORITIES)
     s.add_argument("--reply-to")
+    s.add_argument("--thread", help="defaults to the original message's thread when replying")
     s.add_argument("--project", help="receiver-side project folder (enables the handoff doorbell)")
     s.add_argument("--ref", action="append", help="related path or URL; repeatable")
     s.set_defaults(func=cmd_send)
@@ -223,6 +237,6 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config.load()
     try:
         return args.func(args, cfg)
-    except (StoreError, envelope.EnvelopeError, gitsync.SyncError) as exc:
+    except (StoreError, envelope.EnvelopeError, gitsync.SyncError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

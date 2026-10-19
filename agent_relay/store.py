@@ -28,7 +28,7 @@ class Store:
         self.root = Path(root)
 
     def box(self, agent: str, state: str) -> Path:
-        if not envelope.AGENT_RE.match(agent):
+        if not envelope.safe_name(agent):
             raise StoreError(f"bad agent name: {agent!r}")
         if state not in STATES:
             raise StoreError(f"bad state: {state!r}")
@@ -63,14 +63,19 @@ class Store:
                 if path.name.startswith("."):  # half-written temp file
                     continue
                 try:
-                    out.append((state, envelope.loads(path.read_text(encoding="utf-8"))))
+                    env = envelope.loads(path.read_text(encoding="utf-8"))
                 except (ValueError, OSError):
                     continue
+                # A file must be what it claims: right name, right mailbox. Otherwise
+                # it could borrow another message's id and silence its doorbell.
+                if path.stem != env["id"] or env["to"] != agent:
+                    continue
+                out.append((state, env))
         out.sort(key=lambda item: item[1]["id"])
         return out
 
     def find(self, agent: str, env_id: str) -> tuple[str, Path] | None:
-        if not envelope.ID_RE.match(env_id):
+        if not envelope.safe_name(env_id, envelope.ID_RE):
             raise StoreError(f"bad id: {env_id!r}")
         for state in STATES:
             path = self.box(agent, state) / f"{env_id}.json"

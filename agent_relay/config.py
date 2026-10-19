@@ -5,7 +5,7 @@
     {
       "store": "C:/Users/me/.agent-relay/store",
       "agent": "claude-code",
-      "doorbells": [{"type": "toast"}, {"type": "handoff"},
+      "doorbells": [{"type": "toast"}, {"type": "handoff", "project_roots": ["C:/GitHub"]},
                     {"type": "command", "argv": ["bash", "notify.sh", "{summary}"]}]
     }
 

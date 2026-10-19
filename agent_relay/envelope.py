@@ -17,9 +17,18 @@ SCHEMA = "agent-relay/envelope@1"
 KINDS = ("task", "reply", "note", "result")
 PRIORITIES = ("high", "normal", "low")
 
-# Mailbox names become directory names, so keep them filesystem-safe.
-AGENT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
-ID_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
+# Mailbox names and ids become directory and file names, so keep them safe on
+# Windows too: no trailing dot (Windows strips it, so "codex." aliases "codex"),
+# no reserved device names. Always use fullmatch: "$" would accept a trailing newline.
+AGENT_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9_-])?")
+ID_RE = re.compile(r"[0-9A-Za-z](?:[0-9A-Za-z._-]{0,126}[0-9A-Za-z_-])?")
+CREATED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+WINDOWS_RESERVED = re.compile(r"(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?")
+
+
+def safe_name(value: object, pattern: re.Pattern[str] = AGENT_RE) -> bool:
+    text = str(value)
+    return bool(pattern.fullmatch(text)) and not WINDOWS_RESERVED.fullmatch(text)
 
 REQUIRED = ("schema", "id", "from", "to", "created_at", "kind", "subject", "body")
 
@@ -81,16 +90,25 @@ def validate(env: dict) -> None:
     if env["schema"] != SCHEMA:
         raise EnvelopeError(f"unsupported schema: {env['schema']!r}")
     for key in ("from", "to"):
-        if not AGENT_RE.match(str(env[key])):
+        if not safe_name(env[key]):
             raise EnvelopeError(f"bad agent name in {key!r}: {env[key]!r}")
-    if not ID_RE.match(str(env["id"])):
-        raise EnvelopeError(f"id must be a plain file name: {env['id']!r}")
+    for key in ("id", "thread", "reply_to"):
+        if key in env and not safe_name(env[key], ID_RE):
+            raise EnvelopeError(f"{key} must be a plain file name: {env[key]!r}")
+    if not CREATED_RE.fullmatch(str(env["created_at"])):
+        raise EnvelopeError(f"created_at is not ISO 8601: {env['created_at']!r}")
     if env["kind"] not in KINDS:
         raise EnvelopeError(f"kind must be one of {KINDS}")
     if env.get("priority", "normal") not in PRIORITIES:
         raise EnvelopeError(f"priority must be one of {PRIORITIES}")
     if not str(env["subject"]).strip():
         raise EnvelopeError("subject is empty")
+    for key in ("subject", "host", "project"):
+        if key in env and any(ch in str(env[key]) for ch in (chr(10), chr(13))):
+            raise EnvelopeError(f"{key} must be one line")
+    refs = env.get("refs", [])
+    if not (isinstance(refs, list) and all(isinstance(r, str) for r in refs)):
+        raise EnvelopeError("refs must be a list of strings")
 
 
 def dumps(env: dict) -> str:

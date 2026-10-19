@@ -2,8 +2,8 @@
 
 No public IP and no extra API key: every machine already has push access to the
 store repository, so `git push` is the send and `git pull` is the receive. Only
-the `mailboxes/` path is ever staged, so a store that shares a repository with
-other files never commits anything else.
+the `mailboxes/` path is ever staged (half-written `.tmp-*` files excluded), so a
+store that shares a repository with other files never commits anything else.
 """
 
 from __future__ import annotations
@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 
 PUSH_RETRIES = 3
+TIMEOUT = 120
+MAILBOX_SPEC = ("mailboxes", ":(exclude,glob)mailboxes/**/.tmp-*")
 
 
 class SyncError(RuntimeError):
@@ -19,15 +21,18 @@ class SyncError(RuntimeError):
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    proc = subprocess.run(
-        ["git", "-C", str(root), *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=120,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:  # hung network, git missing
+        raise SyncError(f"git {' '.join(args)} failed: {exc}") from exc
     if check and proc.returncode != 0:
         raise SyncError(f"git {' '.join(args)} failed: {(proc.stderr or proc.stdout).strip()}")
     return proc
@@ -41,16 +46,30 @@ def has_remote(root: Path) -> bool:
     return bool(_git(root, "remote", check=False).stdout.strip())
 
 
+def _rebasing(root: Path) -> bool:
+    git_dir = root / ".git"
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
 def pull(root: Path) -> None:
-    if is_repo(root) and has_remote(root):
+    """Rebase onto the remote. A failed rebase is aborted so the store is never left stuck."""
+    root = Path(root)
+    if not (is_repo(root) and has_remote(root)):
+        return
+    try:
         _git(root, "pull", "--rebase", "--autostash", "--quiet")
+    except SyncError:
+        if _rebasing(root):
+            _git(root, "rebase", "--abort", check=False)
+        raise
 
 
 def commit(root: Path, message: str) -> bool:
     """Stage mailboxes/ only and commit. Returns False when there was nothing to commit."""
-    if not is_repo(root):
+    root = Path(root)
+    if not is_repo(root) or not (root / "mailboxes").is_dir():
         return False
-    _git(root, "add", "-A", "--", "mailboxes")
+    _git(root, "add", "-A", "--", *MAILBOX_SPEC)
     staged = _git(root, "diff", "--cached", "--quiet", "--", "mailboxes", check=False)
     if staged.returncode == 0:
         return False
@@ -59,6 +78,7 @@ def commit(root: Path, message: str) -> bool:
 
 
 def push(root: Path) -> None:
+    root = Path(root)
     if not (is_repo(root) and has_remote(root)):
         return
     for attempt in range(PUSH_RETRIES):
@@ -68,15 +88,18 @@ def push(root: Path) -> None:
         if attempt == PUSH_RETRIES - 1:
             raise SyncError(f"git push failed: {(proc.stderr or proc.stdout).strip()}")
         # Someone else pushed first; envelopes have unique names, so a rebase is safe.
-        _git(root, "pull", "--rebase", "--quiet")
+        pull(root)
 
 
 def clone(url: str, dest: Path, branch: str) -> None:
     """Clone only the mailbox branch of the store repository."""
-    proc = subprocess.run(
-        ["git", "clone", "--quiet", "--single-branch", "--branch", branch, url, str(dest)],
-        capture_output=True, text=True, errors="replace", timeout=300, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "clone", "--quiet", "--single-branch", "--branch", branch, url, str(dest)],
+            capture_output=True, text=True, errors="replace", timeout=300, check=False,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise SyncError(f"git clone failed: {exc}") from exc
     if proc.returncode != 0:
         raise SyncError(f"git clone failed: {proc.stderr.strip()}")
 

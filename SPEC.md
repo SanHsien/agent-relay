@@ -20,21 +20,30 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | 欄位 | 必填 | 型別 | 說明 |
 | --- | --- | --- | --- |
 | `schema` | 是 | string | 固定 `agent-relay/envelope@1`。看不懂的版本要拒收，不要猜 |
-| `id` | 是 | string | `YYYYMMDDTHHMMSSmmmZ-<6 hex>`（UTC）。字典序 = 時間序；只能有 `[0-9A-Za-z._-]` |
-| `from` | 是 | string | 寄件信箱名，`^[a-z0-9][a-z0-9._-]{0,63}$` |
+| `id` | 是 | string | `YYYYMMDDTHHMMSSmmmZ-<6 hex>`（UTC）。字典序 = 時間序。見下方「名稱規則」 |
+| `from` | 是 | string | 寄件信箱名，見下方「名稱規則」 |
 | `to` | 是 | string | 收件信箱名，規則同上 |
 | `created_at` | 是 | string | ISO 8601 UTC，例如 `2026-10-20T01:23:45Z` |
 | `kind` | 是 | enum | `task` 派工、`result` 施工回報、`reply` 一般回覆、`note` 通知 |
-| `subject` | 是 | string | 一行標題，不可空白 |
+| `subject` | 是 | string | 一行標題，不可空白，不可有換行 |
 | `body` | 是 | string | 內文，Markdown。派工信要寫目標、驗收條件、回報格式 |
 | `priority` | 否 | enum | `high` / `normal`（預設）/ `low` |
-| `thread` | 否 | string | 對話串 id。新信等於自己的 `id`，回信沿用原信的 `thread` |
+| `thread` | 否 | string | 對話串 id。新信等於自己的 `id`；回信沿用原信的 `thread`（不是原信的 `id`），所以回信的回信仍在同一串 |
 | `reply_to` | 否 | string | 回覆哪封信的 `id` |
-| `host` | 否 | string | 寄件機器名稱，查問題用 |
+| `host` | 否 | string | 寄件機器名稱，查問題用，不可有換行 |
 | `project` | 否 | string | 收件端機器上的專案資料夾，或 `asr:<會話名或 id>`（從 [agent-session-restore](https://github.com/SanHsien/agent-session-restore) 的登記檔查路徑）。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
 | `refs` | 否 | string[] | 相關路徑或 URL |
 
-不認得的欄位要保留、不可報錯，方便日後加欄位。
+不認得的欄位要保留、不可報錯，方便日後加欄位。`refs` 必須是字串陣列；`subject`、`host`、`project` 不可含換行（它們會被寫進交接卡的 frontmatter）。
+
+### 名稱規則
+
+信箱名與 `id`（以及 `thread`、`reply_to`）會變成目錄名和檔名，所以整串比對（不要用會放過結尾換行的 `^...$` + match）：
+
+- 信箱名：`[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9_-])?`
+- id：`[0-9A-Za-z](?:[0-9A-Za-z._-]{0,126}[0-9A-Za-z_-])?`
+- 不可以 `.` 結尾（Windows 會吃掉結尾的點，`codex.` 會變成 `codex` 的同一個資料夾）。
+- 不可是 Windows 保留裝置名：`con` `prn` `aux` `nul` `com0-9` `lpt0-9`（不分大小寫，含 `nul.txt` 這種帶副檔名的）。
 
 ### 機密與公開 repo
 
@@ -49,7 +58,8 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 <store>/mailboxes/<agent>/done/<id>.json   已結案（ack）
 ```
 
-- **寫入要原子化**：先寫同目錄的暫存檔（`.tmp-` 開頭），再改名成 `<id>.json`。讀取端忽略 `.tmp-*`。
+- **寫入要原子化**：先寫同目錄的暫存檔（`.tmp-` 開頭），再改名成 `<id>.json`。讀取端忽略 `.tmp-*`，git 也不提交它們。
+- **檔案要名實相符**：檔名不等於 `<id>.json`、或 `to` 不等於所在信箱的檔案，讀取端一律略過（不然一個檔可以冒用別封信的 id，讓那封的門鈴不響）。
 - **狀態轉換只用改名**：`new → cur → done`，內容不改。所以兩台機器的 git 合併不會衝突在同一行。
 - **一個信箱只有一個收件人**：同一封信只由收件信箱的主人搬動。寄件人寫完 `new/` 就不再碰。
 - 同一信箱內 `id` 重複要拒收。
@@ -57,7 +67,8 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 ## 3. 跨機器傳送（git）
 
 - store 是一個 git repo 的工作目錄。參考部署用 `[Private Repo: 個人記憶庫]` 的 **`mailbox` 孤兒分支**，各機器另外 clone 這個分支，不碰主分支，也不受主分支每日自動同步影響。
-- 寄送：寫檔 → `git add -A -- mailboxes` → commit（只含 `mailboxes/`）→ `pull --rebase` → `push`。push 被拒就 rebase 重試，最多 3 次。檔名唯一，rebase 不會衝突。
+- 寄送：寫檔 → `git add -A -- mailboxes` → commit（只含 `mailboxes/`）→ `pull --rebase` → `push`。push 被拒就 rebase 重試，最多 3 次。檔名唯一，rebase 不會衝突；萬一 rebase 失敗要 `rebase --abort`，不能讓 store 卡在 rebase 中。
+- push 最後仍失敗時，信已經在本機 commit，下次同步會送出。參考 CLI 回 exit code 3 並註明「已排隊、未推送」，**不要重寄**（重寄會變成兩封）。
 - 接收：`git pull --rebase`。
 - 不需要公網 IP、不需要額外的 API key：每台機器本來就能 push 到自己的 GitHub repo。
 - 延遲 = 收件端排程的輪詢間隔（預設 5 分鐘）。
@@ -66,15 +77,15 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 門鈴只是提醒，**信件檔才是真相**。門鈴失敗不影響信件送達。
 
-- `relay watch --once`：pull 後，對 `new/` 裡這台機器還沒響過的每封信，依序按設定的每個門鈴。響過的 id 記在 `~/.agent-relay/rung-<agent>.json`（每台機器各自記，不進 git）。
+- `relay watch --once`：pull 後，對 `new/` 裡這台機器還沒響過的每封信，依序按設定的每個門鈴。響過的 id 記在 `~/.agent-relay/rung-<agent>.json`（每台機器各自記，不進 git）。**每響完一封就存一次，而且要原子寫入**（暫存檔再改名）：中途被砍掉的那一輪，下次不會把已響過的全部重響。
 - 一個門鈴壞掉要記錄錯誤、繼續按下一個。
 - 內建三種：
 
 | type | 做什麼 | 設定 |
 | --- | --- | --- |
 | `toast` | Windows 右下角通知（WinRT，免安裝模組） | 無 |
-| `command` | 執行一個指令（不經 shell），參數可用 `{id}` `{from}` `{to}` `{subject}` `{kind}` `{summary}` | `argv`、`timeout`（秒） |
-| `handoff` | `kind=task` 且有 `project` 時，在 `<project>/.claude/handoffs/` 放一張 dropoff/pickup 交接卡，下一個 session `/pickup` 就接得到 | 無 |
+| `command` | 執行一個指令（不經 shell），參數可用 `{id}` `{from}` `{to}` `{subject}` `{kind}` `{summary}`。**拒絕 `.bat`/`.cmd`**：Windows 會交給 cmd.exe 重新解析參數，信件內文裡的 `&` 會變成指令。值可能以 `-` 開頭，程式若吃選項請在前面放 `--` | `argv`、`timeout`（秒） |
+| `handoff` | `kind=task` 且有 `project` 時，在 `<project>/.claude/handoffs/` 放一張 dropoff/pickup 交接卡（檔名 `relay-<id>.md`，重響不會多一張），下一個 session `/pickup` 就接得到。專案必須在 `project_roots` 底下，沒設就一律拒絕：放卡的位置是寄件人決定的，收件端要先同意哪些資料夾可以放。交接卡裡的回信指令不放信件標題 | `project_roots`（資料夾陣列，必填） |
 
 每個門鈴都可加 `"kinds": ["task", "result"]` 只對某些信響。手機通知用 `command` 接既有的 Telegram 腳本，例如：
 
