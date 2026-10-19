@@ -109,3 +109,36 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 ```
 
 收件端完成後寄 `kind=result`、`reply_to=<原信 id>`，內文附證據（測試輸出、commit、路徑），再 `ack` 原信。
+
+## 7. 派工契約（dispatch）
+
+`kind=task` 的信可以多帶一個 `dispatch` 物件，要求收件端**自動開一個新的 agent Session** 施工，做完自動回信。
+
+```text
+指揮者 send --run claude --repo <收件端 repo>
+   └─▶ 收件端 watch（排程）── dispatch 門鈴 ──▶ Windows Terminal 新分頁：relay dispatch <id>
+                                                 ├─ git worktree：<repo>/.relay-worktrees/<id>，分支 relay/<id>
+                                                 ├─ headless claude / codex / agy（逾時強制結束整棵行程）
+                                                 └─ 回 kind=result（reply_to、同 thread）＋ ack 原信
+```
+
+| 欄位 | 必填 | 說明 |
+| --- | --- | --- |
+| `runtime` | 是 | `claude`、`codex`、`agy` |
+| `repo` | 是 | 收件端機器上的 git repo 路徑，或 `asr:<會話名>` |
+| `mode` | 否 | `build`（預設，可改檔並在 worktree 分支 commit）或 `plan`（唯讀） |
+| `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度 |
+| `timeout_minutes` | 否 | 1～120，預設 30。超時就結束整棵行程，回信 `status: timeout` |
+
+**收件端政策（config.json 的 `dispatch`，沒設就全部拒絕）**：
+
+```json
+"dispatch": {"runtimes": ["claude", "agy"], "repo_roots": ["C:/GitHub"], "cortex_path": "C:/GitHub/agent-cortex"}
+```
+
+- runtime 不在 `runtimes`、或 repo 不在 `repo_roots` 底下 → 不執行，回一封 `status: refused` 說明原因。
+- 工人只在 worktree 的 `relay/<id>` 分支改檔與 commit，**不 push、不動主工作目錄**。要不要合併，由收信的指揮者看結果再決定。
+- 指令由 [agent-cortex](https://github.com/SanHsien/agent-cortex) 的 launcher 組（設了 `cortex_path` 或能 import 時），沿用它加固過的權限模式：claude `acceptEdits`（plan 模式 `plan`）、codex `workspace-write` 沙箱（plan 模式 `read-only`）、agy 一律 `plan + sandbox`。cortex 載不到就用同樣保守的內建版本。**不會**使用 `bypassPermissions` 或 `--dangerously-*` 旗標。
+- 回信內文：狀態與 exit code、runtime、worktree 與分支、耗時、工人最後回報、commit 清單與 `diff --stat`。
+
+**門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`，你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。

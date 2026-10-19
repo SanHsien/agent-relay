@@ -192,7 +192,13 @@ def ring_handoff(env: dict, bell: dict) -> str:
     return f"ok: {card}"
 
 
-CHANNELS = {"toast": ring_toast, "command": ring_command, "handoff": ring_handoff}
+def ring_dispatch(env: dict, bell: dict) -> str:
+    from .dispatch import ring_dispatch as start  # late import: dispatch imports this module
+
+    return start(env, bell)
+
+
+CHANNELS = {"toast": ring_toast, "command": ring_command, "handoff": ring_handoff, "dispatch": ring_dispatch}
 
 
 def ring(env: dict, bells: list[dict]) -> dict[str, str]:

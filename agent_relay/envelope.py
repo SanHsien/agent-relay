@@ -55,6 +55,7 @@ def build(
     thread: str | None = None,
     project: str | None = None,
     refs: list[str] | None = None,
+    dispatch: dict | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     env_id = new_id(now)
@@ -77,6 +78,8 @@ def build(
         env["project"] = project
     if refs:
         env["refs"] = list(refs)
+    if dispatch:
+        env["dispatch"] = dispatch
     validate(env)
     return env
 
@@ -109,6 +112,12 @@ def validate(env: dict) -> None:
     refs = env.get("refs", [])
     if not (isinstance(refs, list) and all(isinstance(r, str) for r in refs)):
         raise EnvelopeError("refs must be a list of strings")
+    if "dispatch" in env:
+        if env["kind"] != "task":
+            raise EnvelopeError("only kind=task may carry a dispatch section")
+        from .dispatch import validate_spec  # late import: dispatch imports this module
+
+        validate_spec(env["dispatch"])
 
 
 def dumps(env: dict) -> str:

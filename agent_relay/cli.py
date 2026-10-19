@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from . import config, doorbell, envelope, gitsync, poller
+from . import dispatch as dispatcher
 from .store import Store, StoreError
 
 
@@ -51,6 +52,26 @@ def cmd_init(args, cfg) -> int:
     return 0
 
 
+def _dispatch_spec(args: argparse.Namespace) -> dict | None:
+    if not args.run:
+        return None
+    if not args.repo:
+        raise SystemExit("--run needs --repo (receiver-side path or asr:<session>)")
+    spec = {"runtime": args.run, "repo": args.repo, "mode": args.mode, "timeout_minutes": args.timeout}
+    if args.model:
+        spec["model"] = args.model
+    if args.effort:
+        spec["effort"] = args.effort
+    return spec
+
+
+def cmd_dispatch(args, cfg) -> int:
+    report = dispatcher.dispatch(args.id, _agent(args, cfg), cfg, sync=not args.no_sync)
+    text = chr(10).join(f"{k}: {v}" for k, v in report.items())
+    _out(args, report, text)
+    return 0 if report["status"] == "ok" else 4
+
+
 def cmd_send(args, cfg) -> int:
     body = args.body
     if args.body_file:
@@ -76,6 +97,7 @@ def cmd_send(args, cfg) -> int:
         thread=thread,
         project=args.project,
         refs=args.ref,
+        dispatch=_dispatch_spec(args),
     )
     path = store.deliver(env)
     try:
@@ -196,7 +218,19 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--thread", help="defaults to the original message's thread when replying")
     s.add_argument("--project", help="receiver-side project folder (enables the handoff doorbell)")
     s.add_argument("--ref", action="append", help="related path or URL; repeatable")
+    g = s.add_argument_group("dispatch (kind=task only): run this task in a fresh agent session")
+    g.add_argument("--run", choices=dispatcher.RUNTIMES, help="runtime the receiver should start")
+    g.add_argument("--repo", help="receiver-side git repo, or asr:<session>")
+    g.add_argument("--mode", default="build", choices=dispatcher.MODES)
+    g.add_argument("--model")
+    g.add_argument("--effort")
+    g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("dispatch", help="run a dispatch task in a worktree and reply with the result")
+    s.add_argument("id")
+    s.add_argument("--agent")
+    s.set_defaults(func=cmd_dispatch)
 
     for name, func, helptext in (("read", cmd_read, "show a message and mark it read"), ("ack", cmd_ack, "mark done")):
         s = sub.add_parser(name, help=helptext)
