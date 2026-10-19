@@ -22,8 +22,6 @@ FAKE_WORKER = (
     "import json, subprocess, pathlib, sys;"
     "prompt = sys.stdin.read();"
     "pathlib.Path('proof.txt').write_text(prompt, encoding='utf-8');"
-    "subprocess.run(['git', 'add', 'proof.txt'], check=True);"
-    "subprocess.run(['git', 'commit', '-q', '-m', 'relay: fake'], check=True);"
     "print(json.dumps({'type': 'result', 'result': 'wrote proof.txt'}))"
 )
 
@@ -112,13 +110,13 @@ class ArgvTests(DispatchBase):
             self.assertIn("acceptEdits", argv)
             self.assertNotIn("P" + NL + "line2", argv)
             self.assertEqual(stdin, "P" + NL + "line2")
-            self.assertIn("--allowedTools", argv)
+            self.assertNotIn("--allowedTools", argv)  # no shell for a claude worker by default
             argv, _, stdin = dispatch.build_argv({"runtime": "codex", "repo": "x", "mode": "plan"}, "P", "s", Path("L"), wt, {})
             self.assertIn("read-only", argv)
             self.assertEqual(stdin, "P")
             argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", Path("L"), wt, {})
             self.assertIn("workspace-write", argv)
-            self.assertIn("--add-dir", argv)  # git dirs outside the worktree, so the commit works
+            self.assertNotIn("--add-dir", argv)  # workers never get git's own directories
             argv, _, stdin = dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", Path("L"), wt, {})
             self.assertEqual(argv[-3:], ["--mode", "plan", "--sandbox"])
             self.assertIsNone(stdin)
@@ -136,7 +134,8 @@ class ArgvTests(DispatchBase):
         self.assertNotIn("--remote-control", argv)
         self.assertNotIn("P", argv)
         self.assertEqual(stdin, "P")
-        self.assertIn("Bash(git commit *)", argv)
+        self.assertNotIn("--allowedTools", argv)
+        self.assertEqual(argv.count("--add-dir"), 1)  # only the worktree, no .git directories
 
 
 class ExecutableTests(DispatchBase):
@@ -169,7 +168,8 @@ class RunTests(DispatchBase):
         reply = self.reply_for(env)
         self.assertEqual((reply["kind"], reply["thread"]), ("result", env["thread"]))
         self.assertIn("wrote proof.txt", reply["body"])
-        self.assertIn("relay: fake", reply["body"])
+        self.assertIn(f"relay: {env['id']}", reply["body"])  # committed by relay, not the worker
+        self.assertTrue(report["commit"].startswith("committed:"))
         self.assertEqual([s for s, _ in self.store.list("claude-code", ("done",))], ["done"])
         self.assertIn("/.relay-worktrees/", (self.repo / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
 
@@ -216,7 +216,7 @@ class RunTests(DispatchBase):
         self.assertEqual(len(self.replies_for(env)), 1)
         report = self.run_fake(env, "print('again')", force=True)
         self.assertEqual(report["status"], "ok")
-        self.assertIn("relay: fake", self.replies_for(env)[-1]["body"])  # base is the branch's merge-base
+        self.assertIn(f"relay: {env['id']}", self.replies_for(env)[-1]["body"])  # base is the branch's merge-base
 
     def test_stray_folder_is_not_used_as_worktree(self):
         env = self.send_task()
@@ -259,6 +259,51 @@ class LeaseTests(DispatchBase):
         dispatch.write_state(env["id"], phase="running", pid=1, started=0, deadline=1)
         cli.watch_once("claude-code", self.cfg, sync=False)
         self.assertEqual(len(self.replies_for(env)), 1)
+
+
+class CommitGuardTests(DispatchBase):
+    def test_default_claude_tools_grant_no_shell(self):
+        self.assertEqual(dispatch.DEFAULT_CLAUDE_TOOLS, ())
+
+    def test_relay_commit_skips_hooks(self):
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho ran > \"$(git rev-parse --show-toplevel)/HOOK_RAN\"\n", encoding="utf-8")
+        hook.chmod(0o755)
+        env = self.send_task()
+        report = self.run_fake(env)
+        self.assertTrue(report["commit"].startswith("committed:"), report)
+        self.assertFalse((Path(report["worktree"]) / "HOOK_RAN").exists())
+
+    def test_tampered_git_pointer_blocks_commit(self):
+        env = self.send_task()
+        # Windows marks the .git file hidden, so a plain overwrite fails; delete and recreate.
+        tamper = "import os, pathlib; os.remove('.git'); pathlib.Path('.git').write_text('gitdir: C:/evil', encoding='utf-8')"
+        report = self.run_fake(env, tamper)
+        self.assertIn(".git pointer was changed", report["commit"])
+        self.assertIn(".git pointer was changed", self.reply_for(env)["body"])
+
+    def test_plan_mode_commits_nothing(self):
+        env = self.send_task(mode="plan")
+        report = self.run_fake(env, "open('x.txt', 'w').write('x')")
+        self.assertEqual(report["commit"], "plan mode: nothing to commit")
+
+
+class ReaperRobustnessTests(DispatchBase):
+    def test_garbage_lease_does_not_stop_watch(self):
+        env = self.send_task()
+        self.store.read("claude-code", env["id"])
+        dispatch.write_state(env["id"], phase="running", deadline="garbage", started="x")
+        cli.watch_once("claude-code", self.cfg, sync=False)  # must not raise
+        self.assertEqual(self.replies_for(env), [])
+
+    def test_never_started_run_reaped_only_with_dispatch_bell(self):
+        env = self.send_task()
+        later = time.time() + dispatch.LEASE_GRACE_S * 4
+        self.assertEqual(dispatch.reap_interrupted("claude-code", self.cfg, now=later, rung=[env["id"]]), [])
+        self.cfg["doorbells"] = [{"type": "dispatch"}]
+        self.assertEqual(dispatch.reap_interrupted("claude-code", self.cfg, now=time.time(), rung=[env["id"]]), [])
+        self.assertEqual(dispatch.reap_interrupted("claude-code", self.cfg, now=later, rung=[env["id"]]), [env["id"]])
+        self.assertIn("沒有啟動", self.reply_for(env)["body"])
 
 
 class StoreReadTests(DispatchBase):

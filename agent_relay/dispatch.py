@@ -25,6 +25,7 @@ its lease in runs/<id>/state.json and answered with `status: interrupted`.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
@@ -48,12 +49,11 @@ WORKTREE_DIR = ".relay-worktrees"
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 DETACHED_PROCESS, NEW_PROCESS_GROUP, BREAKAWAY_FROM_JOB = 0x00000008, 0x00000200, 0x01000000
 
-# What a claude build worker may run besides editing files: commit its work and run tests.
-DEFAULT_CLAUDE_TOOLS = (
-    "Bash(git add *)", "Bash(git commit *)", "Bash(git status)", "Bash(git status *)",
-    "Bash(git diff)", "Bash(git diff *)", "Bash(git log *)",
-    "Bash(python -m unittest)", "Bash(python -m unittest *)", "Bash(python -m pytest *)",
-)
+# Workers only edit files; relay commits for them afterwards. A claude worker gets no
+# Bash at all by default: claude has no shell sandbox on native Windows, so any
+# "run the tests" rule would let mail text run arbitrary code (write a conftest.py,
+# then pytest it). Receivers may opt in through dispatch.claude_allowed_tools.
+DEFAULT_CLAUDE_TOOLS: tuple[str, ...] = ()
 
 # Rough shapes of common secrets; worker output goes into git history via the reply.
 SECRET_RE = re.compile(
@@ -174,20 +174,13 @@ def _cortex_launcher(cfg: dict):
     return launcher
 
 
-def _git_write_dirs(worktree: Path) -> list[str]:
-    """Outside-the-worktree git paths a branch commit writes (same set cortex allows)."""
-    common = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    own = Path(_git(worktree, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
-    return [str(own), str(common / "objects"), str(common / "refs" / "heads" / "relay"),
-            str(common / "logs" / "refs" / "heads" / "relay")]
-
-
 def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: Path,
                cfg: dict) -> tuple[list[str], str, str | None]:
     """Return (argv, source, stdin_text).
 
     claude and codex take the prompt on stdin: Windows command lines are capped
-    (32K) and a .cmd shim would cut the prompt at its first newline.
+    (32K) and a .cmd shim would cut the prompt at its first newline. Workers never
+    get write access to git's own directories; relay commits after they finish.
     """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
     model = spec.get("model")
@@ -196,32 +189,26 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     if launcher is not None:
         common = {"prompt": prompt, "slice_id": slice_id, "log_dir": str(log_dir), "model": model}
         if runtime == "claude":
-            argv = launcher.build_claude_argv(worktree=str(worktree), read_only=plan,
-                                              commit_required=not plan, **common)
+            argv = launcher.build_claude_argv(worktree=str(worktree), read_only=plan, **common)
             # cortex enables Remote Control for its own monitor; a relay run has no use for it.
             argv = [a for a in argv if a != "--remote-control"]
-            if not plan:
+            if tools and not plan:
                 argv += ["--allowedTools", *tools]
             return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
         if runtime == "codex":
             argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
-                                             commit_required=not plan, effort=spec.get("effort"), **common)
+                                             effort=spec.get("effort"), **common)
             return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
         return launcher.build_agy_argv(**common), "agent-cortex", None
     if runtime == "claude":
         argv = ["claude", "-p", "--output-format", "json",
                 "--permission-mode", "plan" if plan else "acceptEdits", "--add-dir", str(worktree)]
-        if not plan:
-            for extra in _git_write_dirs(worktree):
-                argv += ["--add-dir", extra]
+        if tools and not plan:
             argv += ["--allowedTools", *tools]
         stdin = prompt
     elif runtime == "codex":
         argv = ["codex", "exec", "--json", "--sandbox", "read-only" if plan else "workspace-write",
                 "-C", str(worktree)]
-        if not plan:
-            for extra in _git_write_dirs(worktree):
-                argv += ["--add-dir", extra]
         if spec.get("effort"):
             argv += ["-c", f"model_reasoning_effort={json.dumps(spec['effort'])}"]
         stdin = prompt
@@ -230,6 +217,31 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     if model:
         argv += ["--model", model]
     return argv, "built-in", stdin
+
+
+def _git_marker(worktree: Path) -> bytes | None:
+    try:
+        return (worktree / ".git").read_bytes()
+    except OSError:
+        return None
+
+
+def commit_work(worktree: Path, env_id: str, marker: bytes | None) -> str:
+    """Commit what the worker left, as relay. Hooks are off and the .git pointer must be untouched.
+
+    The worker could edit files in the worktree, including the `.git` file that
+    tells git where the repository lives; a forged one could point at hooks it
+    wrote. So relay refuses to run git there if the pointer changed, and commits
+    with hooks disabled.
+    """
+    if _git_marker(worktree) != marker:
+        return "skipped: the worktree's .git pointer was changed by the worker; not committing"
+    if not _git(worktree, "status", "--porcelain"):
+        return "nothing to commit"
+    safe = ("-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false")
+    _git(worktree, *safe, "add", "-A")
+    _git(worktree, *safe, "commit", "--quiet", "--no-verify", "-m", f"relay: {env_id}")
+    return "committed: " + _git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
 def _prompt_to_stdin(argv: list[str], prompt: str) -> list[str]:
@@ -241,8 +253,9 @@ def _prompt_to_stdin(argv: list[str], prompt: str) -> list[str]:
 def build_prompt(env: dict, worktree: Path, branch: str, plan: bool) -> str:
     rules = (
         "只讀不改，最後輸出你的結論與證據。" if plan else
-        f"只在這個 worktree 內改檔：{worktree}（分支 {branch}）。完成後 `git add` 並 "
-        f"`git commit -m \"relay: {env['id']}\"`，不要 push、不要切分支、不要碰 worktree 以外的路徑。"
+        f"只在這個 worktree 內改檔：{worktree}（分支 {branch}）。不要 commit、不要 push、不要切分支、"
+        "不要碰 worktree 以外的路徑；你結束後 relay 會替你 commit。能執行指令就只在 worktree 內跑驗證；"
+        "不能執行就在回報裡寫清楚寄件者該跑哪些驗證指令。"
     )
     return (
         f"你是 agent-relay 派來的工人，任務信 id {env['id']}，寄件者 {env['from']}。\n"
@@ -410,17 +423,19 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         repo = policy_check(env, spec, cfg.get("dispatch") or {})
         plan = spec.get("mode", "build") == "plan"
         worktree, branch, base = make_worktree(repo, env_id)
+        marker = _git_marker(worktree)
         argv, source, stdin_text = build_argv(spec, build_prompt(env, worktree, branch, plan),
                                               f"relay-{env_id}", run_dir, worktree, cfg)
         argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
         started = time.monotonic()
         status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text)
-        report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source,
+        commit = "plan mode: nothing to commit" if plan else commit_work(worktree, env_id, marker)
+        report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
                       worktree=str(worktree), branch=branch, seconds=round(time.monotonic() - started),
                       log=str(run_dir / "output.log"))
         body = (
             f"status: {status}（exit {code}）\nruntime: {spec['runtime']}（指令由 {source} 組）\n"
-            f"worktree: {worktree}\nbranch: {branch}\n耗時: {report['seconds']} 秒\n"
+            f"worktree: {worktree}\nbranch: {branch}\nrelay commit: {commit}\n耗時: {report['seconds']} 秒\n"
             f"log（收件端機器）: {run_dir / 'output.log'}\n\n"
             f"## 工人最後回報\n{final_text(run_dir / 'output.log')}\n\n"
             f"## 變更\n```text\n{changes(worktree, base)}\n```\n"
@@ -437,21 +452,48 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
     return report
 
 
-def reap_interrupted(agent: str, cfg: dict, now: float | None = None) -> list[str]:
-    """Answer dispatch tasks whose run died: still in cur/, lease expired, never replied."""
+def _never_started(env: dict, cfg: dict, rung: set[str], now: float) -> bool:
+    """Doorbell rang, but no run ever wrote a lease (the tab failed to open, say)."""
+    if env["id"] not in rung or read_state(env["id"]) is not None:
+        return False
+    if not any(bell.get("type") == "dispatch" for bell in cfg.get("doorbells", [])):
+        return False  # without a dispatch doorbell someone runs it by hand; leave it
+    created = calendar.timegm(time.strptime(env["created_at"][:19], "%Y-%m-%dT%H:%M:%S"))
+    return now - created > LEASE_GRACE_S * 3
+
+
+def reap_interrupted(agent: str, cfg: dict, now: float | None = None, rung: list[str] | None = None) -> list[str]:
+    """Answer dispatch tasks that will never reply on their own.
+
+    - in cur/ with a running lease past its deadline: the run died mid-way;
+    - in new/, already rung, no lease after a while: the run never started.
+    One bad message is logged and skipped; it must not stop the watch.
+    """
     store = Store(cfg["store"])
     now = now or time.time()
+    rung_ids = set(rung if rung is not None else doorbell.load_rung(agent))
     reaped = []
-    for state, env in store.list(agent, ("cur",)):
+    for state, env in store.list(agent, ("new", "cur")):
         if env["kind"] != "task" or "dispatch" not in env:
             continue
-        lease = read_state(env["id"])
-        if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline", now + 1)):
-            continue
-        body = (f"status: interrupted\n派工在 {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(lease.get('started', 0)))} "
-                f"開始，超過期限仍未回報（分頁被關、當機或重開機）。worktree 若已建立會保留在原處。\n")
-        _reply(store, agent, env, "interrupted", body)
-        reaped.append(env["id"])
+        try:
+            if state == "cur":
+                lease = read_state(env["id"])
+                if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline")):
+                    continue
+                started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(lease.get("started", 0))))
+                body = (f"status: interrupted\n派工在 {started} 開始，超過期限仍未回報（分頁被關、當機或重開機）。"
+                        "worktree 若已建立會保留在原處。\n")
+            elif _never_started(env, cfg, rung_ids, now):
+                store.read(agent, env["id"])
+                body = ("status: interrupted\n門鈴已響，但派工一直沒有啟動（例如新分頁沒開成）。"
+                        "可以重寄，或在收件端手動 `relay dispatch <id>`。\n")
+            else:
+                continue
+            _reply(store, agent, env, "interrupted", body)
+            reaped.append(env["id"])
+        except Exception as exc:  # noqa: BLE001 - one bad message must not stop the watch
+            doorbell._log(f"reap {env['id']} skipped: {type(exc).__name__}: {exc}")
     return reaped
 
 

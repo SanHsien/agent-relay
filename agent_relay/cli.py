@@ -159,9 +159,12 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     """Ring for every message in new/ that this machine has not rung yet."""
     if sync:
         gitsync.pull(Path(cfg["store"]))
-    for env_id in dispatcher.reap_interrupted(agent, cfg):
-        doorbell._log(f"dispatch {env_id} interrupted: answered with status interrupted")
     rung = doorbell.load_rung(agent)
+    reaped = dispatcher.reap_interrupted(agent, cfg, rung=rung)
+    for env_id in reaped:
+        doorbell._log(f"dispatch {env_id} interrupted: answered with status interrupted")
+    if reaped and sync:  # push the replies now rather than on the next send
+        gitsync.sync(Path(cfg["store"]), f"relay: {agent} reaped {len(reaped)} interrupted dispatch")
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
     report = []
     for env in fresh:
