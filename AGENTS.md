@@ -18,7 +18,7 @@ python -m agent_relay ack <id>
 ## 寄信
 
 - 派工用 `--kind task`，內文寫「目標與動機／驗收條件（DoD）／回報格式／指定 model」四段（見 [SPEC.md](SPEC.md) 第 6 節）。
-- 要讓收件端專案下一個 session `/pickup` 接得到，加 `--project <收件端機器上的專案路徑>`。
+- 要讓收件端專案下一個 session `/pickup` 接得到，加 `--project <收件端機器上的專案路徑>`；不知道路徑就寫 `--project asr:<會話名>`，收件端會從 agent-session-restore 的登記檔查。
 - 信件會進 git 歷史：不放 API key、token、密碼。
 
 ## 信箱名稱

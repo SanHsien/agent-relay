@@ -166,6 +166,23 @@ class DoorbellTests(Base):
         self.assertTrue(text.startswith("---\nstatus: pending\n"))
         self.assertIn(env["id"], text)
 
+    def test_handoff_resolves_asr_session(self):
+        project = self.dir / "proj"
+        project.mkdir()
+        registry = self.dir / "claude-sessions.json"
+        registry.write_text(json.dumps({"version": 1, "sessions": {
+            "old": {"session_id": "old", "name": "inbox", "cwd": str(self.dir / "gone"), "status": "closed"},
+            "s1": {"session_id": "s1", "name": "inbox", "cwd": str(project), "status": "active"},
+        }}), encoding="utf-8")
+        env = envelope.build(sender="commander", to="claude-code", subject="t", body="", kind="task", project="asr:inbox")
+        with mock.patch.dict(os.environ, {"CLAUDE_SESSION_REGISTRY_FILE": str(registry)}):
+            self.assertTrue(doorbell.ring(env, [{"type": "handoff"}])["0:handoff"].startswith("ok"))
+            cards = list((project / ".claude" / "handoffs").glob("*.md"))
+            self.assertEqual(len(cards), 1)
+            self.assertIn(f"to: {project}\n", cards[0].read_text(encoding="utf-8"))
+            env["project"] = "asr:nobody"
+            self.assertTrue(doorbell.ring(env, [{"type": "handoff"}])["0:handoff"].startswith("error"))
+
     def test_command_placeholders_are_not_shell(self):
         env = envelope.build(sender="a", to="b", subject="x; rm -rf /", body="")
         out = self.dir / "out.txt"

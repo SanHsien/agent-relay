@@ -50,8 +50,8 @@ python -m agent_relay poller install --every 5
 | --- | --- | --- | --- |
 | [agentdeck](https://github.com/SanHsien/agentdeck) | Windows 系統匣、排程輪詢 | 托盤每輪檢查信箱並跳通知；排程做法被本 repo 沿用 | T-20261019-01 |
 | [Private Repo: 個人記憶庫] | 信件存放處（`mailbox` 分支） | 只放信件，不改主分支 | T-20261019-01 |
-| [agent-session-restore](https://github.com/SanHsien/agent-session-restore) | 會話登記與喚醒 | 依登記的活躍會話決定交接卡送到哪個專案 | T-20261019-02 |
-| [line-desktop-mcp](https://github.com/SanHsien/line-desktop-mcp) | LINE 桌面版橋接 | 手機門鈴候選；它的傳送要人確認，所以目前手機門鈴走 Telegram | T-20261019-02 |
+| [agent-session-restore](https://github.com/SanHsien/agent-session-restore) | 會話登記與喚醒 | 信件寫 `--project asr:<會話名>`，門鈴從它的會話登記檔查出專案路徑再放交接卡 | T-20261019-02 |
+| [line-desktop-mcp](https://github.com/SanHsien/line-desktop-mcp) | LINE 桌面版橋接 | 手機門鈴候選。它每次傳送都要人確認，不適合自動門鈴，所以手機門鈴目前走 Telegram（`command` 門鈴） | T-20261019-02 |
 
 ### Phase 2：派工契約
 

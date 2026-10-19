@@ -99,14 +99,14 @@ def ring_command(env: dict, bell: dict) -> str:
     return "ok"
 
 
-def handoff_card(env: dict) -> str:
+def handoff_card(env: dict, project: Path | None = None) -> str:
     created = datetime.now().strftime("%Y-%m-%d %H:%M")
     return (
         "---\n"
         "status: pending\n"
         f"from: {env['from']} (agent-relay, host {env.get('host', '?')})\n"
         f"from-session: agent-relay:{env['id']}\n"
-        f"to: {env['project']}\n"
+        f"to: {project or env['project']}\n"
         f"created: {created}\n"
         f"priority: {env.get('priority', 'normal')}\n"
         "notify: rung\n"
@@ -126,10 +126,40 @@ def handoff_card(env: dict) -> str:
     )
 
 
+def asr_registry_path() -> Path:
+    """agent-session-restore's registry (SanHsien/agent-session-restore, storage.py)."""
+    override = os.environ.get("CLAUDE_SESSION_REGISTRY_FILE", "").strip()
+    return Path(override) if override else Path.home() / ".claude" / "claude-sessions.json"
+
+
+def resolve_project(value: str) -> Path:
+    """A folder path, or `asr:<session name or id>` looked up in the asr registry.
+
+    The asr form lets the sender name a session ("the ai-inbox session") without
+    knowing where that project lives on the receiving machine.
+    """
+    if not value.startswith("asr:"):
+        return Path(value).expanduser()
+    wanted = value[4:].strip()
+    try:
+        sessions = json.loads(asr_registry_path().read_text(encoding="utf-8")).get("sessions", {})
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(f"cannot read agent-session-restore registry: {exc}") from exc
+    matches = [
+        entry for key, entry in sessions.items()
+        if isinstance(entry, dict) and wanted in (key, entry.get("session_id"), entry.get("name"))
+    ]
+    active = [entry for entry in matches if entry.get("status") == "active"] or matches
+    if not active or not active[0].get("cwd"):
+        raise FileNotFoundError(f"no session {wanted!r} in agent-session-restore registry")
+    active.sort(key=lambda entry: str(entry.get("updated_at", "")), reverse=True)
+    return Path(active[0]["cwd"])
+
+
 def ring_handoff(env: dict, bell: dict) -> str:
     if env["kind"] != "task" or not env.get("project"):
         return "skipped: not a task with a project"
-    project = Path(env["project"]).expanduser()
+    project = resolve_project(env["project"])
     if not project.is_dir():
         raise FileNotFoundError(f"project folder not on this machine: {project}")
     folder = project / ".claude" / "handoffs"
@@ -137,7 +167,7 @@ def ring_handoff(env: dict, bell: dict) -> str:
     stamp = datetime.now().strftime("%Y%m%d-%H%M")
     card = folder / f"{stamp}-relay-{env['id'][-6:]}.md"
     if not card.exists():
-        card.write_text(handoff_card(env), encoding="utf-8", newline="\n")
+        card.write_text(handoff_card(env, project), encoding="utf-8", newline="\n")
     return f"ok: {card}"
 
 

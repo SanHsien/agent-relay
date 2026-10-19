@@ -31,7 +31,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `thread` | 否 | string | 對話串 id。新信等於自己的 `id`，回信沿用原信的 `thread` |
 | `reply_to` | 否 | string | 回覆哪封信的 `id` |
 | `host` | 否 | string | 寄件機器名稱，查問題用 |
-| `project` | 否 | string | 收件端機器上的專案資料夾。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
+| `project` | 否 | string | 收件端機器上的專案資料夾，或 `asr:<會話名或 id>`（從 [agent-session-restore](https://github.com/SanHsien/agent-session-restore) 的登記檔查路徑）。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
 | `refs` | 否 | string[] | 相關路徑或 URL |
 
 不認得的欄位要保留、不可報錯，方便日後加欄位。
