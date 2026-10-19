@@ -112,6 +112,18 @@ HTTP 200，0.3 秒，回傳 185 個模型 id（gpt-6-astra、gpt-6.1-sol 與各 
 
 ---
 
+### 補測：真實轉發（2026-10-20 07:09）
+
+```text
+$ curl -X POST http://127.0.0.1:10100/v1/messages     -d '{"model":"anthropic/claude-haiku-5-5","max_tokens":8,"messages":[{"role":"user","content":"Reply with exactly: relay-ok"}]}'
+HTTP 200 1.19s
+model: anthropic/claude-haiku-5-5  stop_reason: end_turn  usage: input 49 / output 7 tokens
+content: ["relay-ok"]
+```
+
+一次極小的聊天請求經 opencodex 轉到上游並拿回正確回答，**轉發實測通過**（上面「沒送聊天請求」的限制以此補上）。
+
+
 ## 3. magpie（代理網關，另一選項）
 
 **版本**：最新 release `v0.1.1294`（2026-10-19），專案語言 Go，MIT。本機沒裝，只下載到暫存資料夾試跑。
@@ -186,7 +198,7 @@ WARN gh-auth / gh-permissions / auto-label / agy: live probe skipped
 | Windows 原生 | 是（msvc build） | 是 | 是（單檔 exe） | 是（Python） | 是（Python） |
 | 本機狀態 | 已裝，server 平時不跑 | 已裝，代理執行中 | 未裝（暫存試跑） | 已裝，doctor 3 FAIL | 可用 |
 | 本次實測 | 分割 pane、下指令、讀輸出 | healthz、模型清單 200 | version、help | version、help、doctor | help |
-| 未實測 | 真 agent 狀態感知 | 真實聊天轉發 | gateway 啟動與轉發 | 實際派工 | lint／up／check |
+| 未實測 | 真 agent 狀態感知 | （已補測，見第 2 節） | gateway 啟動與轉發 | 實際派工 | lint／up／check |
 | 主要風險 | server 需手動起 | 代理版本舊、服務不健康 | 新專案、會掃描登入檔 | 設定未完成、sandbox 工具缺 | 無 |
 | 設定量 | 低 | 已完成 | 中 | 高 | 低 |
 
@@ -206,7 +218,7 @@ WARN gh-auth / gh-permissions / auto-label / agy: live probe skipped
 
 | 項目 | 狀況 | 原因 |
 |------|------|------|
-| opencodex 實際聊天轉發 | 沒送 | 避免計費；只做 healthz 與 models |
+| opencodex 實際聊天轉發 | 已補測 | 一次 8 token 請求，HTTP 200，回 `relay-ok` |
 | magpie gateway 轉發 | 沒做 | 會寫設定並掃描登入檔，超出範圍 |
 | magpie `go install` | 沒做 | 已有現成 Windows binary，且不安裝東西 |
 | herdr 真 agent 狀態感知 | 沒做 | 需要在 pane 內啟動 claude／codex，屬互動式 |
