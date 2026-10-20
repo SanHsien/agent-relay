@@ -221,3 +221,37 @@ git 狀態                                  分支、已追蹤但未提交的檔
 - **互動 session**：[harness-guard](https://github.com/SanHsien/harness-guard) 的 `checkout-guard`（PreToolUse：Edit、Write、MultiEdit、NotebookEdit）讀本機 store 的 claim；要改的檔案被別人簽出就擋下（exit 2，說明持有者）。「我」= `AGENT_RELAY_HOLDER`（relay 會替它開的工人設好），否則 `manual:<config 的 agent>@<主機名>`，與 `relay claim` 的預設一致。hook 找 store 的規則與 CLI 相同（config.json，再被 `AGENT_RELAY_STORE`／`AGENT_RELAY_AGENT` 覆蓋，預設 `<home>/store`）。壞掉或缺 schema 的 claim 檔會被略過，不會讓 hook 整個失效。
 - **已知限制**：同一台機器上的兩個互動 session 身分相同（都是 `manual:<agent>@<主機>`），彼此不會互擋；要互擋就各自設不同的 `AGENT_RELAY_HOLDER`。checkout-guard 不攔 Bash 寫檔。
 - **手動簽出**：`relay claim --repo . --path calc.py --ttl 60`、`relay claims --repo .`、`relay release <claim id> --changed calc.py`（只能釋放自己的 claim，別人的要加 `--force`，打卡紀錄會記下是誰釋放的）。
+
+## 10. 額度感知分派與斷線續跑（`runtime: auto`）
+
+派工信寫 `--run auto`，由**收件端**依工單複雜度與**它自己機器上的**額度決定 runtime、模型與推理強度（實際花的是收件端的帳號）。`relay advise` 可以先看決定與交接卡。
+
+```text
+工單（標題、內文、paths、mode）
+   │ 複雜度：high（除錯、根因、競態、架構、重構、安全…）／low（錯字、格式、註解、文件…）／medium
+   ▼
+額度 ── claude：~/.claude/agentdeck-status.json（agentdeck statusline 寫的；重置時間已過視為 0%）
+   │    codex：codex-reset-checker --json（SanHsien/codex-reset-checker；設 advisor.codex_quota_command）
+   │    agy：無本機來源，視為未知（可用）
+   ▼
+路由表（照 agent-advisor 的分工）            額度門檻：5 小時 ≥ 90% 或週 ≥ 95% 就跳過
+  high   claude/opus → codex(effort high) → claude/sonnet
+  medium claude/sonnet → codex(effort medium) → agy
+  low    agy → claude/haiku → codex(effort low)
+  build 模式不選 agy（relay 讓 agy 只讀）；只在 dispatch.runtimes 允許的 runtime 裡挑
+```
+
+- 全部被額度擋下 → 不執行，回 `status: deferred`，寫明最早的重置時間。
+- 回信附「分派（runtime auto）」段：複雜度依據、被跳過的 runtime 與原因、選中的路由。
+- **斷線續跑**：工人失敗時看 log 結尾——
+  - 像斷線或暫時性錯誤（逾時、ECONNRESET、502／503／504、overloaded…）→ 稍等後在同一個 worktree 原地重跑（沿用 [codex-auto-retry](https://github.com/SanHsien/codex-auto-retry) 的做法）。
+  - 像限流（429、rate limit、usage limit、quota exceeded…）→ 改派路由表的下一個 runtime。
+  - 其他失敗不重試。重試次數由 `dispatch.retries`（預設 1）控制；每次嘗試都列在回信的「嘗試」段。
+- **交接卡**：`relay advise --card` 印出 Obsidian／Markdown 卡片：frontmatter（status、complexity、runtime、model、effort、tags）＋派給誰、範圍、要做什麼、驗收條件、備案、派工當下的額度。
+
+```json
+"advisor": {"codex_quota_command": ["node", "C:/GitHub/codex-reset-checker/bin/codex-reset-checker.js"],
+            "claude_status_file": "C:/Users/<you>/.claude/agentdeck-status.json"}
+```
+
+未涵蓋：Antigravity-Manager 的帳號切換（那是帳號設定的變更，不由 relay 自動做）；agy 的額度。

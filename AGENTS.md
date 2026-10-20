@@ -20,7 +20,7 @@ python -m agent_relay ack <id>
 - 派工用 `--kind task`，內文寫「目標與動機／驗收條件（DoD）／回報格式／指定 model」四段（見 [SPEC.md](SPEC.md) 第 6 節）。
 - 要讓收件端專案下一個 session `/pickup` 接得到，加 `--project <收件端機器上的專案路徑>`；不知道路徑就寫 `--project asr:<會話名>`，收件端會從 agent-session-restore 的登記檔查。
 - 信件會進 git 歷史：不放 API key、token、密碼。
-- 要收件端**自動開新 Session 施工**：加 `--run claude|codex|agy --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。
+- 要收件端**自動開新 Session 施工**：加 `--run claude|codex|agy --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。不確定派給誰就寫 `--run auto`，收件端依複雜度與它的額度挑（SPEC 第 10 節）；`--path` 寫出工人可改的檔案範圍（SPEC 第 9 節）。
 
 ## 信箱名稱
 
