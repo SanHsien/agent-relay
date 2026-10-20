@@ -124,7 +124,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| `runtime` | 是 | `claude`、`codex`、`agy` |
+| `runtime` | 是 | `claude`、`codex`、`agy`、`hermes` |
 | `repo` | 是 | 收件端機器上的 git repo 路徑，或 `asr:<會話名>` |
 | `mode` | 否 | `build`（預設，工人改 worktree 裡的檔，relay 事後替它 commit）或 `plan`（唯讀） |
 | `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
@@ -156,6 +156,15 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - **中斷補救**：開跑時寫 `~/.agent-relay/runs/<id>/state.json`（含期限 = 逾時 + 10 分鐘）。分頁被關、當機或重開機時，信會停在 `cur/`；下一輪 `watch` 看到期限已過、還沒回信，就補一封 `status: interrupted` 並 ack，並立刻同步出去。門鈴響了卻一直沒啟動（沒有 state.json，超過 30 分鐘）的信，在有設 dispatch 門鈴時也一樣補回信。補救時某一封出錯只記 log、跳過，不會讓整個 watch 停掉。
 - 已 `done` 的信不會再派；要重跑加 `relay dispatch <id> --force`。worktree 已存在時，只沿用 git 登記為 `relay/<id>` 的那個 worktree，diff 以該分支的 merge-base 為準；路徑上若是別的資料夾就拒絕。
 - 已知範圍：worktree 之間共用同一個 repo 的物件庫，但工人拿不到 `.git` 目錄的寫入權，commit 一律由 relay 做。
+- **hermes**（Hermes Windows desktop 版 CLI）：`hermes.exe -z <短指令> --in <worktree> -t file --usage-file runs/<id>/hermes-usage.json`，可加 `-m`、`--reasoning`。
+  - 單次模式 `-z` **會自動略過核可**，所以安全只靠兩道限制：工具組只給 `file`（`read_file`／`write_file`／`patch`／`search_files`，沒有 terminal 和程式執行）；環境變數 `HERMES_WRITE_SAFE_ROOT` 設為 worktree，寫到 worktree 外會被 Hermes 拒絕。plan 模式把寫入根目錄設成 run 目錄下的空資料夾，worktree 對它是唯讀。
+  - **讀取不受限**：寫入根目錄只管寫，`read_file`／`search_files` 只擋 Hermes 自己的憑證與 `.env`。工人讀得到 `~/.ssh`、其他 repo 和 relay store；被 prompt injection 時，它能把讀到的東西寫進 worktree，經 relay commit 後進入回信的 git 歷史。codex 的 `workspace-write` 也有同類風險。只對信任的寄件者放行 hermes。
+  - exit 0 但用量報告 `completed: false`（迭代額度用完或被中斷）視為 `failed`。每次嘗試前先刪掉舊的用量檔；回信列出每次 Hermes 嘗試的用量，升級到其他 runtime 後也保留。
+  - hermes 不會被 `runtime auto`、改派或 `dispatch.escalation` 選到：這三者只用能施工的 claude／codex，而且 hermes 的額度查不到。要用 hermes 就明寫 `--run hermes`。
+  - 不使用 `--yolo`，也不經過 agent-cortex。
+  - prompt 寫進 `runs/<id>/prompt.md`，命令列只放「讀這個檔」的短指令。
+  - 回信附 `--usage-file` 的用量（模型、tokens、api_calls、估計費用）。
+  - Hermes 沒有 shell，跟 claude 工人一樣不能自己跑測試，驗證交給驗收閘門。
 - codex 經 OpenCodex 代理時注意：直接跑 `codex.exe` 會跳過 `codex.CMD` 外殼裡的 `ocx.exe ensure`。代理沒在跑，工人就會失敗（回信 `failed`），先確認代理常駐。
 
 **門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`（用有主控台的 `python.exe`，relay 的 home 與 store 用參數傳，不靠環境變數），你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。

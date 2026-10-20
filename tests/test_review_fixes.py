@@ -179,6 +179,24 @@ class GitTests(Base):
     def test_commit_without_mailboxes_folder(self):
         self.assertFalse(gitsync.commit(self.init_repo(), "nothing yet"))
 
+    def test_empty_shared_folder_does_not_break_commit(self):
+        # Seen live: an empty claims/ (every claim released) made `git commit -- claims` fail,
+        # and a dispatch reply stayed staged on the receiver.
+        repo = self.init_repo()
+        (repo / "claims").mkdir()
+        Store(repo).deliver(envelope.build(sender="a", to="b", subject="x", body=""))
+        self.assertTrue(gitsync.commit(repo, "m"))
+        self.assertEqual(subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                                        capture_output=True, text=True).stdout, "")
+        # A folder whose last file was removed still gets the removal committed.
+        (repo / "audit").mkdir()
+        (repo / "audit" / "a.json").write_text("{}", encoding="utf-8")
+        self.assertTrue(gitsync.commit(repo, "add audit"))
+        (repo / "audit" / "a.json").unlink()
+        self.assertTrue(gitsync.commit(repo, "drop audit"))
+        tracked = subprocess.run(["git", "-C", str(repo), "ls-files"], capture_output=True, text=True).stdout
+        self.assertNotIn("audit/", tracked)
+
     def test_temp_files_not_committed(self):
         repo = self.init_repo()
         Store(repo).deliver(envelope.build(sender="a", to="b", subject="x", body=""))

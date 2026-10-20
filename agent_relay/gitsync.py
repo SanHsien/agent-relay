@@ -75,6 +75,9 @@ def commit(root: Path, message: str) -> bool:
     staged = _git(root, "diff", "--cached", "--quiet", "--", *dirs, check=False)
     if staged.returncode == 0:
         return False
+    # An empty folder (all claims released) is on disk but known to neither the index nor
+    # HEAD; naming it to `git commit` fails the whole commit ("pathspec did not match").
+    dirs = [d for d in dirs if _tracked(root, d) or _in_head(root, d)]
     _git(root, "commit", "--quiet", "-m", message, "--", *dirs)
     return True
 
@@ -82,6 +85,10 @@ def commit(root: Path, message: str) -> bool:
 def _tracked(root: Path, folder: str) -> bool:
     """A shared folder that was deleted locally (last claim released) still needs its removal committed."""
     return bool(_git(root, "ls-files", "--", folder, check=False).stdout.strip())
+
+
+def _in_head(root: Path, folder: str) -> bool:
+    return bool(_git(root, "ls-tree", "--name-only", "HEAD", "--", folder, check=False).stdout.strip())
 
 
 def push(root: Path) -> None:

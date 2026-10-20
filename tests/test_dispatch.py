@@ -141,6 +141,97 @@ class ArgvTests(DispatchBase):
         self.assertEqual(argv.count("--add-dir"), 1)  # only the worktree, no .git directories
 
 
+class HermesTests(DispatchBase):
+    def test_argv_keeps_prompt_off_the_command_line(self):
+        wt = dispatch.make_worktree(self.repo, "h1")[0]
+        log_dir = self.dir / "runs" / "h1"
+        prompt = "P" + NL + "line2 \"quoted\""
+        launcher = mock.Mock()  # hermes never goes through agent-cortex
+        with mock.patch.object(dispatch, "_cortex_launcher", return_value=launcher):
+            argv, source, stdin = dispatch.build_argv(
+                {"runtime": "hermes", "repo": "x", "model": "m1", "effort": "high"}, prompt, "s", log_dir, wt, {})
+        self.assertEqual((argv[0], argv[1], source, stdin), ("hermes", "-z", "built-in", None))
+        self.assertFalse(launcher.method_calls)
+        self.assertNotIn(prompt, " ".join(argv))
+        self.assertEqual((log_dir / "prompt.md").read_text(encoding="utf-8"), prompt)
+        self.assertIn(str(log_dir / "prompt.md"), argv[2])
+        self.assertEqual(argv[argv.index("--in") + 1], str(wt))
+        self.assertEqual(argv[argv.index("-t") + 1], "file")  # no terminal, no code execution
+        self.assertEqual(argv[argv.index("--usage-file") + 1], str(log_dir / dispatch.HERMES_USAGE))
+        self.assertEqual(argv[argv.index("-m") + 1], "m1")
+        self.assertEqual(argv[argv.index("--reasoning") + 1], "high")
+        for flag in ("--yolo", "--accept-hooks", "terminal", "code_execution"):
+            self.assertNotIn(flag, argv)
+
+    def test_write_root_is_the_worktree_or_an_empty_dir_for_plan(self):
+        wt, run_dir = self.dir / "wt", self.dir / "run"
+        env = dispatch.worker_env({"runtime": "hermes"}, wt, run_dir, "h")
+        self.assertEqual(env, {"AGENT_RELAY_HOLDER": "h", "HERMES_WRITE_SAFE_ROOT": str(wt)})
+        env = dispatch.worker_env({"runtime": "hermes", "mode": "plan"}, wt, run_dir, "h")
+        root = Path(env["HERMES_WRITE_SAFE_ROOT"])
+        self.assertTrue(root.is_dir())
+        self.assertEqual(root.parent, run_dir)
+        self.assertEqual(dispatch.worker_env({"runtime": "claude"}, wt, run_dir, "h"), {"AGENT_RELAY_HOLDER": "h"})
+
+    def test_usage_report(self):
+        run_dir = self.dir / "run"
+        self.assertIsNone(dispatch.hermes_usage(run_dir))
+        run_dir.mkdir()
+        (run_dir / dispatch.HERMES_USAGE).write_text("not json", encoding="utf-8")
+        self.assertIsNone(dispatch.hermes_usage(run_dir))
+        (run_dir / dispatch.HERMES_USAGE).write_text(json.dumps(
+            {"model": "m", "total_tokens": 10, "session_id": "s", "auxiliary": {}}), encoding="utf-8")
+        self.assertEqual(dispatch.hermes_usage(run_dir), {"model": "m", "total_tokens": 10})
+
+    def test_dispatch_passes_write_root_and_reports_usage(self):
+        self.cfg["dispatch"]["runtimes"] = ["hermes"]
+        env = self.send_task(runtime="hermes")
+        # Stand-in for hermes.exe: writes inside its write root and leaves a usage report.
+        code = (
+            "import json, os, pathlib, sys;"
+            "root = pathlib.Path(os.environ['HERMES_WRITE_SAFE_ROOT']);"
+            "(root / 'proof.txt').write_text('hermes', encoding='utf-8');"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({'model': 'fake', 'total_tokens': 42}), encoding='utf-8');"
+            "print('done by fake hermes')"
+        )
+
+        def builder(spec, prompt, slice_id, log_dir, worktree, cfg):
+            return ["hermes", "-c", code, str(log_dir / dispatch.HERMES_USAGE)], "built-in", None
+
+        with mock.patch.object(dispatch, "build_argv", side_effect=builder), \
+                mock.patch.object(dispatch, "resolve_executable", return_value=sys.executable):
+            report = dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False)
+        self.assertEqual(report["status"], "ok", report)
+        self.assertEqual((Path(report["worktree"]) / "proof.txt").read_text(encoding="utf-8"), "hermes")
+        self.assertTrue(report["commit"].startswith("committed:"))
+        self.assertEqual(report["usage"], [{"attempt": 1, "model": "fake", "total_tokens": 42}])
+        body = self.reply_for(env)["body"]
+        self.assertIn("Hermes --usage-file", body)
+        self.assertIn("done by fake hermes", body)
+
+    def test_stale_usage_dropped_and_early_stop_is_a_failure(self):
+        log_dir = self.dir / "runs" / "h2"
+        log_dir.mkdir(parents=True)
+        (log_dir / dispatch.HERMES_USAGE).write_text('{"model": "old"}', encoding="utf-8")
+        dispatch.build_hermes_argv({"runtime": "hermes"}, "P", log_dir, self.repo)
+        self.assertFalse((log_dir / dispatch.HERMES_USAGE).exists())
+
+        self.cfg["dispatch"]["runtimes"] = ["hermes"]
+        env = self.send_task(runtime="hermes")
+        # exit 0, but Hermes reports it stopped before finishing (iteration budget used up).
+        code = ("import json, pathlib, sys;"
+                "pathlib.Path(sys.argv[1]).write_text(json.dumps({'completed': False}), encoding='utf-8')")
+
+        def builder(spec, prompt, slice_id, log_dir, worktree, cfg):
+            return ["hermes", "-c", code, str(log_dir / dispatch.HERMES_USAGE)], "built-in", None
+
+        with mock.patch.object(dispatch, "build_argv", side_effect=builder), \
+                mock.patch.object(dispatch, "resolve_executable", return_value=sys.executable):
+            report = dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False)
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["usage"], [{"attempt": 1, "completed": False}])
+
+
 class ExecutableTests(DispatchBase):
     def test_batch_shim_refused(self):
         shim = self.dir / "claude.cmd"

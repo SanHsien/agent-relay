@@ -39,7 +39,7 @@ from . import advisor, config, context, doorbell, envelope, gates, gitsync, lock
 from .context import redact
 from .store import Store
 
-RUNTIMES = ("claude", "codex", "agy")
+RUNTIMES = ("claude", "codex", "agy", "hermes")
 MODES = ("build", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
@@ -256,6 +256,8 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
     model = spec.get("model")
+    if runtime == "hermes":
+        return build_hermes_argv(spec, prompt, log_dir, worktree), "built-in", None
     tools = list((cfg.get("dispatch") or {}).get("claude_allowed_tools") or DEFAULT_CLAUDE_TOOLS)
     launcher = _cortex_launcher(cfg)
     if launcher is not None:
@@ -289,6 +291,57 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     if model:
         argv += ["--model", model]
     return argv, "built-in", stdin
+
+
+HERMES_TOOLSETS = "file"  # read_file, write_file, patch, search_files: no terminal, no code execution
+HERMES_USAGE = "hermes-usage.json"
+
+
+def build_hermes_argv(spec: dict, prompt: str, log_dir: Path, worktree: Path) -> list[str]:
+    """Hermes one-shot (`-z`) skips approvals, so the toolset and write root are the whole fence.
+
+    The prompt goes into a file in the run directory and the command line only
+    points at it: Windows caps command lines at 32K, and the prompt never has to
+    survive argument quoting. worker_env() sets HERMES_WRITE_SAFE_ROOT.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # A killed or rejected run writes no report: never pass off an earlier attempt's usage as this one's.
+    (log_dir / HERMES_USAGE).unlink(missing_ok=True)
+    prompt_file = log_dir / "prompt.md"
+    prompt_file.write_text(prompt, encoding="utf-8")
+    argv = ["hermes", "-z",
+            f"你的任務全文在 {prompt_file}（UTF-8）。先用 read_file 讀完它，再照它的規則與內容施工。",
+            "--in", str(worktree), "-t", HERMES_TOOLSETS, "--usage-file", str(log_dir / HERMES_USAGE)]
+    if spec.get("model"):
+        argv += ["-m", spec["model"]]
+    if spec.get("effort"):
+        argv += ["--reasoning", spec["effort"]]
+    return argv
+
+
+def worker_env(spec: dict, worktree: Path, run_dir: Path, holder: str) -> dict:
+    """Extra environment for the worker process."""
+    extra = {"AGENT_RELAY_HOLDER": holder}
+    if spec["runtime"] == "hermes":
+        # Hermes refuses writes outside these roots. A plan run gets an empty directory
+        # of its own, so the worktree itself is read-only to it.
+        root = run_dir / "hermes-readonly-root" if spec.get("mode", "build") == "plan" else worktree
+        root.mkdir(parents=True, exist_ok=True)
+        extra["HERMES_WRITE_SAFE_ROOT"] = str(root)
+    return extra
+
+
+def hermes_usage(run_dir: Path) -> dict | None:
+    """The cost report Hermes writes with --usage-file, trimmed to what a reply needs."""
+    try:
+        data = json.loads((run_dir / HERMES_USAGE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    keys = ("model", "provider", "api_calls", "input_tokens", "output_tokens", "total_tokens",
+            "estimated_cost_usd", "cost_status", "completed", "failed", "turn_exit_reason")
+    return {k: data[k] for k in keys if k in data}
 
 
 def _git_marker(worktree: Path) -> bytes | None:
@@ -665,6 +718,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         fallbacks = list(decision.fallbacks) if decision else []
         limited: set[str] = set()
         escalations: list[str] = []
+        usages: list[dict] = []
         for round_no in (1, 2):  # round 2 only when the cheap worker failed and escalation is on
             round_start = len(attempts)  # each round gets its own retries
             while True:
@@ -680,8 +734,13 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
                 argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
                 status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
-                                   extra_env={"AGENT_RELAY_HOLDER": holder})
+                                   extra_env=worker_env(spec, worktree, run_dir, holder))
                 failure = classify_failure(run_dir / "output.log") if status == "failed" else None
+                if spec["runtime"] == "hermes":
+                    usage = hermes_usage(run_dir)
+                    usages.append({"attempt": len(attempts) + 1, **(usage or {"report": "missing"})})
+                    if status == "ok" and usage and usage.get("completed") is False:
+                        status = "failed"  # exit 0 but Hermes stopped early (iteration budget, interrupt)
                 attempts.append(f"{spec['runtime']}{'/' + spec['model'] if spec.get('model') else ''}：{status}"
                                 f"{'（' + failure + '）' if failure else ''}")
                 if not failure or len(attempts) - round_start > retries:
@@ -776,6 +835,10 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             + ("\n## 回流升級\n" + "\n".join(f"- {e}" for e in escalations) + "\n" if escalations else "")
             + (gate_section(gate) if gate else "")
         )
+        if usages:  # every Hermes attempt, also when a later round escalated to another runtime
+            report["usage"] = usages
+            body += ("\n## 用量（Hermes --usage-file，每次嘗試）\n```json\n"
+                     + json.dumps(usages, ensure_ascii=False, indent=2) + "\n```\n")
         report["attempts"] = attempts
         if outside:
             report["status"] = "out-of-scope"
