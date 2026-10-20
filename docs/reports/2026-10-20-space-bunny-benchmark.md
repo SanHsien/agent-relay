@@ -45,18 +45,18 @@ curl.exe -s -o NUL -w "connect %{time_connect}s ttfb %{time_starttransfer}s tota
 
 整張派工 85 秒（含兩次驗收）。派工 id `20261020T151929609Z-7e6d40`，回信「回流升級」段：`claude/haiku：ok → 閘門 verification-failed；升級到 claude/opus`。
 
-同一天其他便宜工人的紀錄（皆有驗證）：
+同一天其他便宜工人的紀錄（都有回信或 commit 紀錄；只有標「閘門」的那幾次跑過驗收閘門）：
 
 | 工人 | 任務 | 耗時 | 結果 |
 | --- | --- | --- | --- |
-| claude-haiku-5-5 | calc 加 add＋測試 | 60 秒 | ok |
-| claude-haiku-5-5（acceptEdits、無 shell） | calc 加 div／neg | 30 秒 | ok |
-| agy gemini-3.8-flash-low（agy-staff implement） | calc 加 mul＋測試 | 43 秒 | ok |
-| agy（plan＋sandbox，唯讀） | 審查缺少的邊界測試 | 44 秒 | ok |
+| claude-haiku-5-5 | calc 加 add＋測試 | 60 秒 | ok（工人自報 unittest 通過，當時未開閘門） |
+| claude-haiku-5-5（acceptEdits、無 shell） | calc 加 div／neg | 30 秒 | ok（指揮者在 worktree 自跑 unittest 通過） |
+| agy gemini-3.8-flash-low（agy-staff implement） | calc 加 mul＋測試 | 43 秒 | ok（主 session 自跑 unittest 通過；非 relay 派工，無回信） |
+| agy（plan＋sandbox，唯讀） | 審查缺少的邊界測試 | 44 秒 | ok（唯讀，無閘門） |
 
 ## 4. 怎麼解讀
 
 - 便宜工人在**機械、範圍清楚**的任務上一次就過，成本約 $0.02；這才是省錢的來源。
-- 便宜工人在**規格比工單寫的更多**時，會只做表面（本例），這時靠驗收閘門抓出來、再交給強模型，總成本約等於直接用強模型（$0.70 對 $0.69 左右），但多換到一份「為什麼第一輪不夠」的紀錄。
+- 便宜工人在**規格比工單寫的更多**時，會只做表面（本例），這時靠驗收閘門抓出來、再交給強模型，總成本是 $0.019＋$0.685≈$0.70。這次沒有讓 opus 從頭單獨做同一題，所以「是否比直接用強模型貴」只能推估：第 2 輪是在 haiku 已修一半的基礎上做的，單獨跑 opus 的成本應該相近或略高。換到的是一份「為什麼第一輪不夠」的紀錄。
 - 所以順序應該是：先由 `runtime auto`（SPEC 第 10 節）把明顯困難的工單直接派給強模型，機械工單派便宜工人，再用回流升級（SPEC 第 12 節）接住判斷失誤的那一部分。
 - MiniMax M3.1 Flash 若補測後正確率接近 haiku、且免費版限流可接受，可以放進 low 層，取代 haiku 進一步壓低成本。
