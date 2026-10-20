@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import advisor, config, doorbell, envelope, gitsync, locks, poller, signing
 from . import context as handover
+from . import status as relay_status
 from . import accept as accepter
 from . import dispatch as dispatcher
 from .store import Store, StoreError
@@ -309,7 +310,20 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
         report.append({"id": env["id"], "subject": env["subject"], "bells": doorbell.ring(env, cfg["doorbells"])})
         rung.append(env["id"])
         doorbell.save_rung(agent, rung)  # per message: a run cut short does not re-ring the rest
+    if relay_status.heartbeat(cfg, agent) and sync:
+        gitsync.sync(Path(cfg["store"]), f"relay: {agent} heartbeat")
     return report
+
+
+def cmd_status(args, cfg) -> int:
+    if not args.no_sync:
+        try:
+            gitsync.pull(Path(cfg["store"]))
+        except gitsync.SyncError as exc:
+            print(f"warning: store pull failed, showing the local copy: {exc}", file=sys.stderr)
+    data = relay_status.overview(cfg, args.stale_minutes)
+    _out(args, data, relay_status.render(data))
+    return 8 if any(h["stale"] for h in data["hosts"]) or data["overdue"] else 0
 
 
 def cmd_watch(args, cfg) -> int:
@@ -441,6 +455,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("agent", help="the mailbox this key may speak for")
     s.add_argument("public_key", help="a .pub file, the key line itself, or - for stdin")
     s.set_defaults(func=cmd_trust)
+
+    s = sub.add_parser("status", help="open mail per mailbox, receiver heartbeats, runs on this machine")
+    s.add_argument("--stale-minutes", type=float, default=relay_status.DEFAULT_STALE_MIN,
+                   help="a heartbeat older than this counts as a stopped receiver")
+    s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")

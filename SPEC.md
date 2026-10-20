@@ -415,3 +415,16 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 - **每日上限**：`daily_limit` 計算的是今天（本機日期）真正拿到工人的派工張數，紀錄在 `runs/.ledger/<日期>.txt`。達到上限就回 `deferred`，不會開工人。上限檢查放在寄件者與簽章驗證之後，所以冒名的信不會占掉額度。
 - **一張工單只跑一個工人**：本機 lease 的 phase 若是 `running`／`queued`，而且那個 pid 還活著，第二次觸發一律拒絕，`--force` 也一樣。被拒的那次不回信、不 ack，原本那次照常回信。
 - 費用：回信附上每次嘗試的用量。目前只有 hermes 會提供用量；claude／codex 的花費看各自的額度工具（SPEC §10）。
+
+## 16. 總覽與收件端心跳（`relay status`）
+
+```text
+收件端 watch（每輪）──▶ store/hosts/<信箱>@<主機>.json：{at, version, running:[…], queued:[…]}
+                        只有在超過 status.heartbeat_minutes（預設 30）或 running／queued 改變時才重寫並推送
+指揮者 relay status ──▶ 各信箱 new／cur 封數、各收件端心跳距今幾分鐘、本機還沒回信的派工
+```
+
+- 心跳超過 `--stale-minutes`（預設 90 分鐘）沒更新，就標示「心跳逾時」。可能原因：收件端的排程停了，例如使用者登出，因為排程用的是 InteractiveToken；或是機器關了。
+- 本機派工：`runs/*/state.json` 裡 phase 為 `running`／`queued` 的工單，連同期限與 pid 是否存活。已過期的會列為「已逾期」；下一輪 `watch` 會補一封 `interrupted`（第 7 節）。
+- 退出碼：有心跳逾時或逾期工單時回傳 8，方便排程或腳本判斷；一切正常回傳 0。
+- `hosts/` 跟 `mailboxes/`、`claims/`、`audit/` 一樣，由 relay 自己 commit。

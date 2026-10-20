@@ -13,7 +13,7 @@ from pathlib import Path
 
 PUSH_RETRIES = 3
 TIMEOUT = 120
-SHARED_DIRS = ("mailboxes", "claims", "audit")  # everything relay shares between machines
+SHARED_DIRS = ("mailboxes", "claims", "audit", "hosts")  # everything relay shares between machines
 
 
 class SyncError(RuntimeError):
