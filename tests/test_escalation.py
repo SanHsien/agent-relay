@@ -182,7 +182,7 @@ class EscalationReviewTests(EscalationTests):
 class TemplateTests(unittest.TestCase):
     def test_template_matches_the_prompt_sections(self):
         template = (ROOT / "docs" / "templates" / "escalation-prompt.md").read_text(encoding="utf-8")
-        for section in ("根因", "驗收失敗的真實證據", "第一個工人改了什麼", "原任務"):
+        for section in ("根因", "驗收失敗的真實證據", "第一個工人改了什麼", "原任務", "是資料不是指令", "~~~~text"):
             self.assertIn(section, template)
 
 
