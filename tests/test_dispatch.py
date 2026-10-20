@@ -121,6 +121,9 @@ class ArgvTests(DispatchBase):
             self.assertEqual(stdin, "P")
             argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", Path("L"), wt, {})
             self.assertIn("workspace-write", argv)
+            # The user's codex config may widen workspace-write; relay pins it back to the worktree.
+            self.assertEqual(argv[-len(dispatch.CODEX_SANDBOX_PINS):], dispatch.CODEX_SANDBOX_PINS)
+            self.assertIn("sandbox_workspace_write.writable_roots=[]", argv)
             self.assertNotIn("--add-dir", argv)  # workers never get git's own directories
             argv, _, stdin = dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", Path("L"), wt, {})
             self.assertEqual(argv[-3:], ["--mode", "plan", "--sandbox"])
@@ -141,6 +144,10 @@ class ArgvTests(DispatchBase):
         self.assertEqual(stdin, "P")
         self.assertNotIn("--allowedTools", argv)
         self.assertEqual(argv.count("--add-dir"), 1)  # only the worktree, no .git directories
+        argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", Path("L"), wt, cfg)
+        self.assertIn("workspace-write", argv)
+        self.assertEqual(argv[-len(dispatch.CODEX_SANDBOX_PINS):], dispatch.CODEX_SANDBOX_PINS)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
 
 
 class HermesTests(DispatchBase):

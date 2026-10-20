@@ -297,6 +297,15 @@ def _cortex_launcher(cfg: dict):
     return launcher
 
 
+# The user's own ~/.codex/config.toml can widen workspace-write (writable_roots, or %TEMP%,
+# where a worktree may well live) and even switch it off (sandbox_mode). Found live: a
+# writable_roots entry let a relay worker write the main repo's .git/hooks. A relay worker
+# writes its worktree and nothing else, whatever that file says.
+CODEX_SANDBOX_PINS = ["-c", "sandbox_workspace_write.writable_roots=[]",
+                      "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+                      "-c", "sandbox_workspace_write.exclude_slash_tmp=true"]
+
+
 def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: Path,
                cfg: dict) -> tuple[list[str], str, str | None]:
     """Return (argv, source, stdin_text).
@@ -323,7 +332,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
         if runtime == "codex":
             argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
                                              effort=spec.get("effort"), **common)
-            return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
+            return _prompt_to_stdin(argv, prompt) + CODEX_SANDBOX_PINS, "agent-cortex", prompt
         return launcher.build_agy_argv(**common), "agent-cortex", None
     if runtime == "claude":
         argv = ["claude", "-p", "--output-format", "json",
@@ -336,6 +345,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
                 "-C", str(worktree)]
         if spec.get("effort"):
             argv += ["-c", f"model_reasoning_effort={json.dumps(spec['effort'])}"]
+        argv += CODEX_SANDBOX_PINS
         stdin = prompt
     else:
         argv, stdin = ["agy", "--print", prompt, "--mode", "plan", "--sandbox"], None
@@ -846,6 +856,9 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                     shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
                 argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
                 argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
+                # The exact command (prompt left out): the reply's proof of which sandbox the worker had.
+                shown = ["<prompt>" if a == prompt else a for a in argv]
+                (run_dir / "argv.json").write_text(json.dumps(shown, ensure_ascii=False), encoding="utf-8")
                 status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
                                    extra_env=worker_env(spec, worktree, run_dir, holder))
                 failure = classify_failure(run_dir / "output.log") if status == "failed" else None
@@ -940,6 +953,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             report["commit_sha"] = _git(worktree, "rev-parse", "HEAD").strip()
         body = (
             f"status: {status}（exit {code}）\nruntime: {spec['runtime']}（指令由 {source} 組）\n"
+            f"指令: {' '.join(shown)}\n"
             f"worktree: {worktree}\nbranch: {branch}\nrelay commit: {commit}\n耗時: {report['seconds']} 秒\n"
             f"log（收件端機器）: {run_dir / 'output.log'}\n\n"
             f"## 工人最後回報\n{final_text(run_dir / 'output.log')}\n\n"
