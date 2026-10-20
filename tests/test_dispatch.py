@@ -225,6 +225,28 @@ class RunTests(DispatchBase):
         self.assertEqual(report["status"], "refused")
         self.assertIn("is not the", self.reply_for(env)["body"])
 
+    def test_broken_bundle_does_not_stop_run(self):
+        env = self.send_task()
+        with mock.patch.object(dispatch.context, "bundle", side_effect=TypeError("bad vault")):
+            self.assertEqual(self.run_fake(env)["status"], "ok")
+
+    def test_session_tail_off_for_dispatch_by_default(self):
+        seen = {}
+
+        def capture(repo, cfg, **kw):
+            seen.update(kw)
+            return ""
+
+        env = self.send_task()
+        with mock.patch.object(dispatch.context, "bundle", side_effect=capture):
+            self.run_fake(env)
+        self.assertIs(seen["sessions"], False)
+        self.cfg["dispatch"]["context_sessions"] = True
+        env = self.send_task()
+        with mock.patch.object(dispatch.context, "bundle", side_effect=capture):
+            self.run_fake(env)
+        self.assertIs(seen["sessions"], True)
+
     def test_timeout_kills_worker(self):
         status, code = dispatch.run([sys.executable, "-c", "import time; time.sleep(60)"], self.dir, self.dir / "o.log", 1)
         self.assertEqual((status, code), ("timeout", None))

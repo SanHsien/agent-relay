@@ -2,22 +2,23 @@
 
 Add to a settings file (user, project, or a --settings file):
 
-    {"hooks": {"SessionStart": [{"matcher": "startup|resume|clear|compact",
-        "hooks": [{"type": "command", "command": "python C:/GitHub/agent-relay/hooks/session_start.py"}]}]}}
+    {"hooks": {"SessionStart": [{"matcher": "startup|clear",
+        "hooks": [{"type": "command", "timeout": 15,
+                   "command": "python C:/GitHub/agent-relay/hooks/session_start.py"}]}]}}
 
-It reads the hook payload on stdin, prints {"hookSpecificOutput": {... "additionalContext": ...}}
-when there is something to hand over, and stays silent (exit 0) on any error, so a
-session never fails to start because of it.
+It reads the hook payload on stdin (UTF-8), prints
+{"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ...}}
+when there is something to hand over, and always exits 0, so a session never
+fails to start because of it.
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-from agent_relay.context import main_hook  # noqa: E402
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from agent_relay.context import main_hook
+except Exception:  # noqa: BLE001 - a broken install must not block a session start
+    sys.exit(0)
 
 sys.exit(main_hook())

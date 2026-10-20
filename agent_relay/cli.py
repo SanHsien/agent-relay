@@ -291,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
+    if args.cmd == "context" and args.hook:
+        return handover.main_hook()  # before config.load: a hook must never fail
     for attr, var in (("home", "AGENT_RELAY_HOME"), ("store", "AGENT_RELAY_STORE")):
         if getattr(args, attr, None):
             os.environ[var] = getattr(args, attr)
