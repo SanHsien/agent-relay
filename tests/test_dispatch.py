@@ -305,7 +305,7 @@ class BaseAndResultTests(DispatchBase):
         return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
     def test_base_format(self):
-        for bad in ("HEAD", "main", "--upload-pack=x", "abc", "A" * 40, 7):
+        for bad in ("HEAD", "main", "--upload-pack=x", "abc", "c" * 10, "A" * 40, 7):
             with self.subTest(bad=bad), self.assertRaises(envelope.EnvelopeError):
                 dispatch.validate_spec({"runtime": "claude", "repo": "x", "base": bad})
 
@@ -314,7 +314,7 @@ class BaseAndResultTests(DispatchBase):
         (self.repo / "local.txt").write_text("receiver-only commit\n", encoding="utf-8")
         git("add", ".", cwd=self.repo)
         git("commit", "--quiet", "-m", "local", cwd=self.repo)
-        env = self.send_task(base=pinned[:10])
+        env = self.send_task(base=pinned)
         report = self.run_fake(env)
         self.assertEqual(report["status"], "ok", report)
         self.assertEqual(report["base"], pinned)
@@ -325,6 +325,19 @@ class BaseAndResultTests(DispatchBase):
         self.assertEqual(result["branch"], f"relay/{env['id']}")
         self.assertEqual(result["commit"], self.head(report["worktree"]))
         self.assertEqual(len(result["commit"]), 40)
+
+    def test_cli_resolves_base_to_full_sha(self):
+        full = self.head(self.repo)
+        cwd = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            self.assertEqual(cli._full_sha("HEAD"), full)
+            self.assertEqual(cli._full_sha(full[:8]), full)
+            self.assertEqual(cli._full_sha(full.upper()), full)
+            with self.assertRaises(SystemExit):
+                cli._full_sha("no-such-ref")
+        finally:
+            os.chdir(cwd)
 
     def test_base_fetched_from_origin(self):
         upstream = self.dir / "upstream"

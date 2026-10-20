@@ -54,6 +54,19 @@ def cmd_init(args, cfg) -> int:
     return 0
 
 
+def _full_sha(ref: str) -> str:
+    """--base takes any ref in the current repo; the envelope always carries the full sha."""
+    if len(ref) == 40 and all(c in "0123456789abcdef" for c in ref.lower()):
+        return ref.lower()
+    import subprocess
+
+    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}"],
+                          capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"--base {ref!r} is not a commit in the current repository; pass a full 40-char sha")
+    return proc.stdout.strip()
+
+
 def _dispatch_spec(args: argparse.Namespace) -> dict | None:
     if not args.run:
         return None
@@ -65,7 +78,7 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
     if args.tdd:
         spec["tdd"] = True
     if args.base:
-        spec["base"] = args.base.lower()
+        spec["base"] = _full_sha(args.base)
     if args.model:
         spec["model"] = args.model
     if args.effort:

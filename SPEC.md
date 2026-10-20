@@ -129,7 +129,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `mode` | 否 | `build`（預設，工人改 worktree 裡的檔，relay 事後替它 commit）或 `plan`（唯讀） |
 | `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
 | `timeout_minutes` | 否 | 1～120，預設 30。超時就結束整棵行程，回信 `status: timeout` |
-| `base` | 否 | 施工起點的 commit sha（7～40 個小寫 hex）。收件端本機沒有就 `git fetch origin` 一次，仍找不到就 `refused`。沒寫就用收件端當下的 HEAD；那可能在別的分支上，或帶著還沒推送的 commit，所以要把成果帶回去（第 14 節）的派工都應該寫 `base` |
+| `base` | 否 | 施工起點的完整 commit sha（40 個小寫 hex；短前綴可能被能推送 origin 的人暴力碰撞，所以不收）。寄件端 `--base` 可寫任何 ref，CLI 會在目前的 repo 先解析成完整 sha。收件端本機沒有就 `git fetch origin` 一次，仍找不到就 `refused`。沒寫就用收件端當下的 HEAD；那可能在別的分支上，或帶著還沒推送的 commit，所以要把成果帶回去（第 14 節）的派工都應該寫 `base` |
 
 **回信的結構化欄位**：派工回信（`kind=result`）多一個 `result` 物件，給程式讀，不用解析內文。它在簽章範圍內：
 

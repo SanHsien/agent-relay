@@ -43,7 +43,7 @@ from .store import Store
 RUNTIMES = ("claude", "codex", "agy", "hermes")
 MODES = ("build", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh")
-BASE_RE = re.compile(r"[0-9a-f]{7,40}")
+BASE_RE = re.compile(r"[0-9a-f]{40}")  # full sha only: a short prefix can be brute-forced by anyone who can push to origin
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 DEFAULT_TIMEOUT_MIN = 30
 DEFAULT_MAX_AGE_H = 168  # a signed task older than a week is not run (limits replays of old mail)
@@ -146,7 +146,7 @@ def validate_spec(spec: object) -> dict:
     if "effort" in spec and spec["effort"] not in EFFORTS:
         raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
     if "base" in spec and not (isinstance(spec["base"], str) and BASE_RE.fullmatch(spec["base"])):
-        raise envelope.EnvelopeError("dispatch.base must be a commit sha (7-40 lowercase hex)")
+        raise envelope.EnvelopeError("dispatch.base must be a full 40-hex commit sha")
     for flag in ("tdd", "escalate"):
         if flag in spec and not isinstance(spec[flag], bool):
             raise envelope.EnvelopeError(f"dispatch.{flag} must be true or false")
