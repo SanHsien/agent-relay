@@ -9,6 +9,7 @@ Every outcome is written to the audit log and answered to the receiver.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -68,75 +69,117 @@ def check_reply(env: dict, cfg: dict) -> dict:
     return result
 
 
+def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
+    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+                          capture_output=True, check=False, timeout=120).returncode == 0
+
+
+def preflight(cfg: dict, env: dict, repo: Path, into: str | None) -> tuple[str, list[str]]:
+    """Local problems (dirty tree, wrong branch, no verify command): fix them and run accept again.
+
+    These raise AcceptError before anything is recorded: the receiver must not be told
+    its work was rejected because of the commander's own checkout.
+    """
+    command = gates.verify_command(repo, ((cfg.get("accept") or {}).get("verify") or {}))
+    if not command:
+        raise AcceptError("no accept.verify.command in this machine's config; refusing to merge unverified work")
+    current = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if not current:
+        raise AcceptError("the target repo has a detached HEAD; check out the branch to merge into")
+    if into and into != current:
+        raise AcceptError(f"--into {into} is not the checked-out branch ({current}); check it out first")
+    if _git(repo, "status", "--porcelain", "--untracked-files=no"):
+        raise AcceptError("the target repo has uncommitted changes; commit or stash them first")
+    commit = (env.get("result") or {}).get("commit")
+    if isinstance(commit, str) and len(commit) == SHA_LEN and _git(repo, "cat-file", "-t", commit, check=False) == "commit" \
+            and _is_ancestor(repo, commit, "HEAD"):
+        raise AcceptError(f"{commit[:12]} is already merged into {current}")
+    return current, command
+
+
 def accept(cfg: dict, agent: str, reply_id: str, repo: Path, into: str | None = None,
            sync: bool = True) -> dict:
-    """Fetch, verify, merge. Returns the report; raises nothing for a refusal (status 'rejected')."""
+    """Fetch, merge in a scratch worktree, verify the merge, fast-forward. A refusal is status 'rejected'.
+
+    Raises AcceptError only for problems on this side (see preflight); those record nothing.
+    """
     repo = Path(repo).resolve()
+    notes: list[str] = []
     if sync:
         try:
             gitsync.pull(Path(cfg["store"]))
-        except gitsync.SyncError:
-            pass
+        except gitsync.SyncError as exc:
+            notes.append(f"store pull failed, using the local copy: {exc}")
     env = load_reply(cfg, agent, reply_id)
-    report: dict = {"reply": reply_id, "repo": str(repo), "status": "rejected"}
-    notes: list[str] = []
+    current, command = preflight(cfg, env, repo, into)
+    report: dict = {"reply": reply_id, "repo": str(repo), "into": current, "status": "rejected"}
     try:
         result = check_reply(env, cfg)
         report.update(branch=result["branch"], commit=result["commit"], base=result["base"])
-        current = _git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-        if not current:
-            raise AcceptError("the target repo has a detached HEAD; check out the branch to merge into")
-        if into and into != current:
-            raise AcceptError(f"--into {into} is not the checked-out branch ({current}); check it out first")
-        report["into"] = current
-        if _git(repo, "status", "--porcelain", "--untracked-files=no"):
-            raise AcceptError("the target repo has uncommitted changes; commit or stash them first")
+        if result["branch"] != f"relay/{env.get('reply_to')}":
+            raise AcceptError(f"reply {reply_id} answers {env.get('reply_to')} but names branch {result['branch']}")
         _git(repo, "fetch", "--quiet", "--no-tags", "origin", result["pushed"]["ref"])
         fetched = _git(repo, "rev-parse", "FETCH_HEAD")
         if fetched != result["commit"]:
             # Someone pushed to the branch after the receiver replied: that is not what was verified.
             raise AcceptError(f"origin {result['branch']} is at {fetched[:12]}, the reply names {result['commit'][:12]}")
-        if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", result["base"], result["commit"]],
-                          capture_output=True, check=False).returncode != 0:
+        if not _is_ancestor(repo, result["base"], result["commit"]):
             raise AcceptError(f"commit {result['commit'][:12]} does not descend from base {result['base'][:12]}")
-        report["verify"] = verify(repo, result["commit"], cfg, reply_id, notes)
+        head = _git(repo, "rev-parse", "HEAD")
+        message = f"relay accept: {result['branch']} (reply {reply_id})"
+        merged, report["verify"] = merge_and_verify(repo, head, result["commit"], message, command, cfg, reply_id, notes)
         if report["verify"]["exit"] != 0:
             raise AcceptError(f"verification failed on this machine (exit {report['verify']['exit']}); "
                               f"log {report['verify']['log']}")
-        proc = subprocess.run(["git", "-C", str(repo), "merge", "--no-ff", "--no-edit", "-m",
-                               f"relay accept: {result['branch']} (reply {reply_id})", result["commit"]],
-                              capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-        if proc.returncode != 0:
-            subprocess.run(["git", "-C", str(repo), "merge", "--abort"], capture_output=True, check=False)
-            raise AcceptError(f"merge failed, aborted: {(proc.stderr or proc.stdout).strip()[:500]}")
-        report.update(status="accepted", merge=_git(repo, "rev-parse", "HEAD"))
+        if _git(repo, "rev-parse", "HEAD") != head:
+            raise AcceptError(f"{current} moved while verifying; run accept again")
+        # The exact merge commit that was verified, nothing else: a fast-forward to it.
+        _git(repo, "merge", "--ff-only", "--quiet", merged)
+        report.update(status="accepted", merge=merged)
     except AcceptError as exc:
         report["reason"] = str(exc)
+    except (subprocess.SubprocessError, OSError) as exc:
+        report["reason"] = f"{type(exc).__name__}: {exc}"
     report["notes"] = notes
-    _record(cfg, agent, env, report, sync)
+    try:
+        _record(cfg, agent, env, report, sync)
+    except Exception as exc:  # noqa: BLE001 - the merge (if any) already happened; say so instead of a traceback
+        notes.append(f"could not record or answer: {type(exc).__name__}: {exc}")
     return report
 
 
-def verify(repo: Path, commit: str, cfg: dict, reply_id: str, notes: list[str]) -> dict:
-    """Run the commander's own verify command on `commit` in a throwaway worktree."""
+def merge_and_verify(repo: Path, head: str, commit: str, message: str, command: list[str], cfg: dict,
+                     reply_id: str, notes: list[str]) -> tuple[str, dict]:
+    """Merge `commit` into `head` in a throwaway worktree and run the verify command on that merge.
+
+    What gets verified is what would land: the target branch may have moved past the
+    task's base since it was sent.
+    """
     settings = (cfg.get("accept") or {}).get("verify") or {}
-    command = gates.verify_command(repo, settings)
-    if not command:
-        raise AcceptError("no accept.verify.command in this machine's config; refusing to merge unverified work")
     timeout = settings.get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN)
     timeout_s = int(timeout) * 60 if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0 \
         else gates.DEFAULT_TIMEOUT_MIN * 60
     run_dir = config.home() / "accepts" / reply_id
-    scratch = Path(tempfile.mkdtemp(prefix="relay-accept-")) / "wt"
+    holder = Path(tempfile.mkdtemp(prefix="relay-accept-"))
+    scratch = holder / "wt"
     try:
-        gates._scratch_worktree(repo, commit, scratch)
-    except subprocess.CalledProcessError as exc:
-        raise AcceptError(f"could not create a verification worktree: {exc.stderr!r}") from exc
-    try:
-        run = gates.run_logged(command, scratch, run_dir / f"verify-{time.strftime('%Y%m%d-%H%M%S')}.log", timeout_s)
+        try:
+            gates._scratch_worktree(repo, head, scratch)
+        except subprocess.CalledProcessError as exc:
+            raise AcceptError(f"could not create a verification worktree: {exc.stderr!r}") from exc
+        try:
+            proc = subprocess.run(["git", "-C", str(scratch), *gates.SAFE_GIT, "merge", "--no-ff", "--no-edit",
+                                   "-m", message, commit], capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", check=False, timeout=300)
+            if proc.returncode != 0:
+                raise AcceptError(f"does not merge cleanly into the target branch: {(proc.stderr or proc.stdout).strip()[:500]}")
+            merged = _git(scratch, "rev-parse", "HEAD")
+            run = gates.run_logged(command, scratch, run_dir / f"verify-{time.strftime('%Y%m%d-%H%M%S')}.log", timeout_s)
+        finally:
+            gates._drop_worktree(repo, scratch, notes)
     finally:
-        gates._drop_worktree(repo, scratch, notes)
-    return {k: run[k] for k in ("command", "exit", "seconds", "log", "sha256", "tail")}
+        shutil.rmtree(holder, ignore_errors=True)
+    return merged, {k: run[k] for k in ("command", "exit", "seconds", "log", "sha256", "tail")}
 
 
 def _record(cfg: dict, agent: str, env: dict, report: dict, sync: bool) -> None:

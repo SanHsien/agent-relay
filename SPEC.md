@@ -368,18 +368,23 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 收件端  dispatch ok、閘門過、relay commit ──▶ push relay/<id> 到 repo 的 origin（dispatch.push_branch）
                                               回信 result.pushed = {remote, ref, commit}（有簽章）
 指揮者  relay accept <回信 id> --repo <自己的 clone> [--into <分支>]
-          ├─ 驗回信簽章、status ok、commit／base 是完整 sha、pushed 指向 relay/<id>
-          ├─ 工作目錄乾淨、目前分支就是 --into
+          ├─ 本機前置檢查（失敗只報錯、不記錄、不通知收件端）：有 accept.verify.command、
+          │  不是 detached HEAD、目前分支就是 --into、工作目錄乾淨、這個 commit 還沒合併過
+          ├─ 驗回信簽章、status ok、commit／base 是完整 sha、pushed 指向 relay/<回覆的那張派工 id>
           ├─ fetch origin relay/<id>：FETCH_HEAD 必須等於回信的 commit（回信後又被推的分支不收）
           ├─ base 必須是 commit 的祖先
-          ├─ 暫時 worktree 跑「指揮者自己的」accept.verify.command（不讀分支裡的設定）
-          └─ 通過才 merge --no-ff；任何一步失敗 = rejected。結果寫 audit，並回一封 note 給收件端
+          ├─ 暫時 worktree：從目前 HEAD 做 merge --no-ff <commit>，在「合併結果」上跑指揮者自己的
+          │  accept.verify.command（不讀分支裡的設定）
+          └─ 通過且 HEAD 沒動過，才把主 repo merge --ff-only 到那個驗證過的合併 commit。
+             其他失敗 = rejected；結果寫 audit，並回一封 note 給收件端
 ```
 
 **收件端（推送）**：
 
 - `dispatch.push_branch: true` 才推送。條件是工人正常結束（status ok）、驗收閘門通過或沒設閘門，而且 relay 真的 commit 了。推送前會關掉 hooks。
-- 只推到收件端自己 clone 的 `origin`，信件指定不了遠端。`origin` 必須是主人自己的 GitHub repo（`https://github.com/SanHsien/`、`git@github.com:SanHsien/` 開頭），或是 `dispatch.push_remotes` 明列的遠端（本機路徑要完全相同）。其他遠端一律不推送，回信寫明原因。
+- 只推到收件端自己 clone 的 `origin`，信件指定不了遠端。檢查的是 `git remote get-url --push --all origin`，也就是 git 真正會推的每一個網址（含 `pushurl`、`pushInsteadOf`）。每個網址都必須是下列其中一種，否則一律不推送，回信寫明原因：
+  - 主人自己的 GitHub repo，網址要完全符合：`https://github.com/SanHsien/<repo>`、`git@github.com:SanHsien/<repo>` 或 `ssh://git@github.com/SanHsien/<repo>`，可接 `.git`。只比對前綴不夠：`SanHsien/../other/x.git` 會被 libcurl 折疊成別人的 repo。
+  - `dispatch.push_remotes` 明列的遠端（本機路徑要完全相同）。
 - 推送失敗不影響派工的 status；回信的「推送」段落與 `push_error` 會寫明原因，`result` 不會有 `pushed`。
 
 **指揮者（驗收）**：
@@ -392,8 +397,9 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 ```
 
 - 沒設 `accept.verify.command` 就拒絕合併，不合併沒驗證過的成果。`"loop-policy"` 讀的是指揮者 clone 主工作目錄的 `loop-policy.toml`，不是分支裡的那份。
-- 驗證在暫時 worktree 跑，log 存在 `~/.agent-relay/accepts/<回信 id>/verify-*.log`，連同 sha256 寫進 audit 和給收件端的 note。
-- 合併訊息是 `relay accept: relay/<id> (reply <回信 id>)`。合併衝突時會 `merge --abort` 並回報 rejected。
-- 指揮者 repo 自己的 hooks 照常執行：合併的是已在本機驗證過的程式，而且是在主人自己的 repo。
+- 驗證的是「目前分支＋成果」的合併結果，不只是分支本身：派工送出後，目標分支可能已經往前走。驗證在暫時 worktree 跑，log 存在 `~/.agent-relay/accepts/<回信 id>/verify-*.log`，連同 sha256 寫進 audit 和給收件端的 note。
+- 合併訊息是 `relay accept: relay/<id> (reply <回信 id>)`。合併有衝突時回報 rejected，主 repo 不受影響。
+- 主 repo 只做 fast-forward，不會產生新的合併 commit，所以合進來的就是驗證過的那個 commit。暫時 worktree 裡的合併會關掉 hooks。
+- 執行中遇到 git 逾時或 I/O 錯誤，記為 rejected 並附原因；記錄或通知失敗時，不會掩蓋已完成的合併（寫在 notes）。
 - 結束後回信會被 ack，收件端收到 `accepted:`／`rejected:` 開頭的 note。
 - 已知限制：驗證指令會執行分支裡的程式碼（驗證本來就要執行它）；派工前就要只信任簽章過的收件端。

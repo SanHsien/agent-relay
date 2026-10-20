@@ -676,7 +676,8 @@ def read_state(env_id: str) -> dict | None:
         return None
 
 
-OWN_REMOTES = ("https://github.com/SanHsien/", "git@github.com:SanHsien/", "ssh://git@github.com/SanHsien/")
+OWN_REMOTE_RE = re.compile(r"(?:https://github\.com/|git@github\.com:|ssh://git@github\.com/)SanHsien/"
+                           r"(?!\.\.?(?:\.git)?/?$)[A-Za-z0-9_.-]+?(?:\.git)?/?")
 
 
 def _same_path(a: str, b: str) -> bool:
@@ -693,7 +694,8 @@ def push_allowed(url: str, policy: dict) -> bool:
     the remote is whatever `origin` of the receiver's own clone already is.
     """
     url = url.strip()
-    if any(url.startswith(prefix) for prefix in OWN_REMOTES):
+    # A full match, not a prefix: libcurl folds "SanHsien/../other/x.git" into another owner's repo.
+    if OWN_REMOTE_RE.fullmatch(url) and not re.search(r"/\.\.?(?:/|\.git|$)", url):
         return True
     for allowed in policy.get("push_remotes") or []:
         if isinstance(allowed, str) and (url == allowed or _same_path(url, allowed)):
@@ -703,9 +705,13 @@ def push_allowed(url: str, policy: dict) -> bool:
 
 def push_branch(repo: Path, branch: str, commit: str, policy: dict) -> dict:
     """Push relay/<id> to the repo's origin. Returns the `pushed` result field or raises DispatchError."""
-    url = _git(repo, "remote", "get-url", "origin").strip()
-    if not push_allowed(url, policy):
-        raise DispatchError(f"origin {url} is not one of the owner's repos or dispatch.push_remotes; not pushing")
+    # --push: what `git push` will really use (pushurl, pushInsteadOf), not the fetch url
+    # --all: a remote may carry several push urls, and git pushes to every one of them.
+    urls = [u for u in _git(repo, "remote", "get-url", "--push", "--all", "origin").splitlines() if u.strip()]
+    bad = [u for u in urls if not push_allowed(u, policy)]
+    if not urls or bad:
+        raise DispatchError(f"origin {', '.join(bad or ['(none)'])} is not one of the owner's repos "
+                            "or dispatch.push_remotes; not pushing")
     ref = f"refs/heads/{branch}"
     # Hooks off: the branch holds the worker's files, and pre-push hooks run from the repo's config.
     _git(repo, "-c", "core.hooksPath=" + os.devnull, "push", "--quiet", "--no-verify", "origin", f"{commit}:{ref}")
