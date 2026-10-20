@@ -267,14 +267,17 @@ git 狀態                                  分支、已追蹤但未提交的檔
 工人做完、範圍檢查通過後，relay 在收件端跑驗收閘門；沒過就不 commit，回信狀態寫明哪一關。
 
 ```text
-空殼檢查   改動的非測試 .py：函式本體只有 pass／...／raise NotImplementedError → stub-rejected
-           （@abstractmethod、@overload、Protocol／ABC 內的宣告不算）
-TDD 紅燈   信件 dispatch.tdd: true 或設定 verify.tdd: true 時：
-           在 base commit 開暫時 worktree，只放進工人新增或修改的測試檔，跑驗證指令 → 必須失敗
-           沒有測試檔、或修改前就通過 → tdd-not-proven（沒證明重現了問題）
-綠燈       在工人的 worktree 跑驗證指令 → 失敗就 verification-failed
-紀錄       每次執行的完整終端輸出存成 runs/<id>/verify-red.log、verify-green.log，
-           回信附指令、exit code、最後 15 行與 log 的 sha256；store/audit 記一筆 verify 事件（不含輸出內容）
+防護     工人刪了測試檔、或改了測試設定檔（conftest.py、pyproject.toml、setup.cfg、tox.ini、pytest.ini、
+         loop-policy.toml、package.json…）→ guarded（要允許就設 verify.allow_test_deletion／allow_config_changes）
+空殼檢查 工人**新增或改動**的非測試 .py 函式，本體只有 pass／...／return None／raise NotImplementedError → stub-rejected
+         （base 裡原本就有的 no-op 不算；@abstractmethod、@overload、Protocol 成員不算；繼承 ABC 但沒標 abstract 的照樣算）
+TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base commit 開暫時 worktree：
+           base 單獨跑驗證指令 → 必須通過（起點是綠的，否則 tdd-not-proven）
+           放進工人新增或修改的測試檔再跑 → 必須失敗（證明重現了問題，否則 tdd-not-proven）
+綠燈     在工人的 worktree 跑驗證指令 → 失敗就 verification-failed
+紀錄     每次執行的完整終端輸出直接寫進 runs/<id>/verify-base.log、verify-red.log、verify-green.log；
+         逾時就結束整棵行程（含孫行程）；回信附指令、exit code、最後 15 行與 log 的 sha256；
+         store/audit 記一筆 verify 事件（不含輸出內容）
 ```
 
 收件端設定（信件**只能要求** TDD，不能提供要跑的指令）：
@@ -289,4 +292,6 @@ TDD 紅燈   信件 dispatch.tdd: true 或設定 verify.tdd: true 時：
 - `command` 可以寫 `"loop-policy"`：沿用 repo 自己的 `loop-policy.toml` `[verification].quick_gate`（[ai-quality-gates](https://github.com/SanHsien/ai-quality-gates) 的格式）。
 - `require_verification: true` 時，沒有設定閘門就回 `unverified`（不 commit）；信件要求 TDD 但收件端沒設閘門也一樣。沒設這些時閘門是關的，行為和以前一樣。
 - 閘門會執行工人寫的測試程式，等同你自己手動跑測試；只對信任的寄件者與 repo 開啟。
+- 開了閘門（或要求 TDD）而工人沒有正常結束（failed／timeout）時，relay 不 commit 半成品。
+- **已知限制**：紅燈只看 exit code，看不出失敗原因（測試 import 了工人新加的模組，在 base 上 ImportError 也算紅燈）；暫時 worktree 沒有被 gitignore 的東西（.venv、node_modules、建置產物），依賴它們的指令在 base 就會失敗，結果是 tdd-not-proven（偏向擋下）。空殼檢查只看 Python，抓不到 lambda 或其他語言。工人仍可在受保護清單以外的地方動手腳讓測試空過（例如改測試 helper），閘門擋的是「沒重現就修」和「沒跑測試就宣稱完成」，不是蓄意欺騙；合併前仍要看 diff。
 - 互動 session 的同類防線在 [harness-guard](https://github.com/SanHsien/harness-guard)：`claim-guard`（沒有驗證紀錄就宣稱完成會被擋）、`test-gate-guard`（測試沒綠不准 commit／push）。[agent-governance-toolkit](https://github.com/SanHsien/agent-governance-toolkit) 的執行期政策引擎可作為更嚴格的外層，relay 不直接依賴它。

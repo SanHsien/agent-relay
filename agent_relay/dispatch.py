@@ -46,6 +46,7 @@ MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 DEFAULT_TIMEOUT_MIN = 30
 MAX_TIMEOUT_MIN = 120
 LEASE_GRACE_S = 600
+PID_TRUST_S = 1800  # past deadline by this much, a live-looking pid is assumed reused
 WORKTREE_DIR = ".relay-worktrees"
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 DETACHED_PROCESS, NEW_PROCESS_GROUP, BREAKAWAY_FROM_JOB = 0x00000008, 0x00000200, 0x01000000
@@ -99,11 +100,10 @@ def failure_text(log_file: Path) -> str:
         if not isinstance(event, dict):
             continue
         if event.get("type") in ERROR_EVENT_TYPES or (event.get("type") == "result" and event.get("is_error")):
-            for key in ("api_error_status", "error", "message", "subtype"):
-                if event.get(key):
-                    picked.append(str(event[key]))
+            parts = [str(event[key]) for key in ("api_error_status", "error", "message", "subtype") if event.get(key)]
             if event.get("type") == "result" and event.get("is_error") and isinstance(event.get("result"), str):
-                picked.append(event["result"][:500])  # the CLI's own error summary
+                parts.append(event["result"][:500])  # the CLI's own error summary
+            picked = parts  # only the last error event counts: earlier ones may have recovered
     return "\n".join(picked + plain[-8:])
 
 
@@ -596,6 +596,8 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                         deadline=time.time() + timeout_s + LEASE_GRACE_S)
             if claim:
                 claim = locks.extend(Path(cfg["store"]), claim, timeout_s + LEASE_GRACE_S)
+                if sync and attempts:
+                    _sync(cfg, f"relay: extend {claim['id']}")  # other machines must see the new expiry
             if attempts:  # keep the previous attempt's evidence
                 shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
             argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
@@ -625,6 +627,8 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                     deadline=time.time() + gate_window + LEASE_GRACE_S)
         if claim:
             claim = locks.extend(Path(cfg["store"]), claim, gate_window + LEASE_GRACE_S)
+            if sync and policy.get("verify"):
+                _sync(cfg, f"relay: extend {claim['id']} for gates")
         # Never run git in the worktree once the worker may have redirected its .git pointer.
         tampered = _git_marker(worktree) != marker
         found = None if tampered else changed_files(worktree, base)
@@ -656,6 +660,10 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                       + ", ".join(outside[:20]))
         elif gate and not gate.passed:
             commit = f"skipped: 驗收閘門沒過（{gate.status}），relay 沒有 commit"
+        elif gate is None and status != "ok" and (policy.get("verify") or policy.get("require_verification")
+                                                  or spec.get("tdd") is True):
+            # No real test run for an unfinished worker: never commit its half-done tree.
+            commit = f"skipped: 工人沒有正常結束（{status}），未驗收，relay 沒有 commit"
         else:
             commit = commit_work(worktree, env_id, marker)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
@@ -754,8 +762,11 @@ def reap_interrupted(agent: str, cfg: dict, now: float | None = None, rung: list
                 lease = read_state(env["id"])
                 if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline")):
                     continue
-                if pid_alive(lease.get("pid")):
-                    continue  # still running (a long gate, a slow retry): not interrupted
+                # The lease is rewritten before every attempt and before the gates, so a run
+                # that is really alive is never far past it. Well past it, a "live" pid is a
+                # reused one (after a reboot): answer anyway.
+                if pid_alive(lease.get("pid")) and now < float(lease.get("deadline")) + PID_TRUST_S:
+                    continue
                 started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(lease.get("started", 0))))
                 body = (f"status: interrupted\n派工在 {started} 開始，超過期限仍未回報（分頁被關、當機或重開機）。"
                         "worktree 若已建立會保留在原處。\n")

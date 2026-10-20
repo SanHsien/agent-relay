@@ -219,9 +219,6 @@ class FailureClassTests(unittest.TestCase):
                 self.assertEqual(dispatch.classify_failure(log), want, text)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ReviewFixTests(DispatchAutoTests):
     """Regression tests for the T-20261018-16 review."""
@@ -229,9 +226,10 @@ class ReviewFixTests(DispatchAutoTests):
     def test_reaper_skips_a_live_process(self):
         env = self.send("加 power 函式")
         self.store.read("cc", env["id"])
-        dispatch.write_state(env["id"], phase="running", pid=os.getpid(), started=0, deadline=1)  # me: alive
+        just_expired = time.time() - 5
+        dispatch.write_state(env["id"], phase="running", pid=os.getpid(), started=0, deadline=just_expired)  # me: alive
         self.assertEqual(dispatch.reap_interrupted("cc", self.cfg), [])
-        dispatch.write_state(env["id"], phase="running", pid=999999999, started=0, deadline=1)
+        dispatch.write_state(env["id"], phase="running", pid=999999999, started=0, deadline=just_expired)
         self.assertEqual(dispatch.reap_interrupted("cc", self.cfg), [env["id"]])
 
     def test_each_attempt_refreshes_the_lease(self):
@@ -347,3 +345,36 @@ class KeywordTests(unittest.TestCase):
                                     ("Fix typo in README", "", "low"),
                                     ("Refactor `rename_all()` in utils/rename.py", "", "high")):
             self.assertEqual(advisor.complexity(subject, body)[0], want, subject)
+
+
+class SecondReviewTests(DispatchAutoTests):
+    def test_reused_pid_is_reaped_well_past_deadline(self):
+        env = self.send("加 power 函式")
+        self.store.read("cc", env["id"])
+        dispatch.write_state(env["id"], phase="running", pid=os.getpid(), started=0, deadline=1000)
+        with mock.patch.object(dispatch, "pid_alive", return_value=True):
+            self.assertEqual(dispatch.reap_interrupted("cc", self.cfg, now=1000 + 60), [])
+            self.assertEqual(dispatch.reap_interrupted("cc", self.cfg, now=1000 + dispatch.PID_TRUST_S + 1), [env["id"]])
+
+    def test_only_last_error_event_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "o.log"
+            log.write_text(json.dumps({"type": "error", "message": "Reconnecting... (stream disconnected)"}) + "\n"
+                           + json.dumps({"type": "turn.failed", "error": "tests failed"}) + "\n", encoding="utf-8")
+            self.assertIsNone(dispatch.classify_failure(log))
+
+    def test_wrong_shape_json_marked_as_read_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.json"
+            path.write_text("[1,2]", encoding="utf-8")
+            self.assertEqual(advisor.claude_quota(path).source, "讀取失敗")
+        for out in ("[]", "null"):
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=out)):
+                self.assertEqual(advisor.codex_quota(["c"]).source, "讀取失敗")
+
+    def test_chinese_sentence_with_path_keeps_keywords(self):
+        self.assertEqual(advisor.complexity("請重構agent_relay/dispatch的鎖競態", "")[0], "high")
+
+
+if __name__ == "__main__":
+    unittest.main()

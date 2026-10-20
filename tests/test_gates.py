@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -100,9 +101,10 @@ class DispatchGateTests(unittest.TestCase):
         report, body = self.go(f"{self.ADD_MUL};{self.ADD_TEST}", tdd=True)
         self.assertEqual(report["status"], "ok", body)
         self.assertTrue(report["commit"].startswith("committed:"))
-        self.assertEqual([r["phase"] for r in report["gate"]["logs"]], ["red", "green"])
-        self.assertNotEqual(report["gate"]["logs"][0]["exit"], 0)
-        self.assertIn("TDD 紅燈", body)
+        self.assertEqual([r["phase"] for r in report["gate"]["logs"]], ["base", "red", "green"])
+        self.assertEqual(report["gate"]["logs"][0]["exit"], 0)
+        self.assertNotEqual(report["gate"]["logs"][1]["exit"], 0)
+        self.assertIn("問題有被重現", body)
         self.assertIn("sha256：", body)
         green_log = Path(os.environ["AGENT_RELAY_HOME"]) / "runs"
         self.assertTrue(any(p.name == "verify-green.log" for p in green_log.rglob("*.log")))
@@ -152,7 +154,66 @@ class DispatchGateTests(unittest.TestCase):
         self.go(f"{self.ADD_MUL};{self.ADD_TEST}", tdd=True)
         events = [json.loads(p.read_text(encoding="utf-8")) for p in Path(self.cfg["store"], "audit").rglob("*verify*.json")]
         self.assertEqual(events[0]["status"], "ok")
-        self.assertEqual([r["phase"] for r in events[0]["runs"]], ["red", "green"])
+        self.assertEqual([r["phase"] for r in events[0]["runs"]], ["base", "red", "green"])
+
+
+
+class GateReviewTests(DispatchGateTests):
+    """Regression tests for the T-20261018-18 review."""
+
+    def test_red_base_cannot_fake_a_red(self):
+        # base already red: a broken old test. The worker deletes it and adds a trivial one.
+        (self.repo / "test_old.py").write_text("import unittest\nclass O(unittest.TestCase):\n"
+                                               "    def test_x(self):\n        self.fail('old')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "red base"], check=True)
+        self.cfg["dispatch"]["verify"]["allow_test_deletion"] = True
+        code = ("import os; os.remove('test_old.py');"
+                "open('test_new.py','w').write('import unittest\\nclass N(unittest.TestCase):\\n"
+                "    def test_t(self):\\n        self.assertTrue(True)\\n')")
+        report, body = self.go(code, tdd=True)
+        self.assertEqual(report["status"], "tdd-not-proven")
+        self.assertIn("修改前的程式本身就沒通過", body)
+
+    def test_deleting_tests_is_guarded(self):
+        report, body = self.go("import os; os.remove('test_calc.py')")
+        self.assertEqual(report["status"], "guarded")
+        self.assertIn("test_calc.py", body)
+
+    def test_touching_test_config_is_guarded(self):
+        report, _ = self.go("open('conftest.py','w').write('collect_ignore = []\\n')")
+        self.assertEqual(report["status"], "guarded")
+
+    def test_old_noop_is_not_a_new_stub(self):
+        (self.repo / "calc.py").write_text("def sub(a, b):\n    return a - b\n\n\ndef legacy_noop():\n    pass\n",
+                                           encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "noop"], check=True)
+        report, _ = self.go("open('calc.py','a').write('\\n\\ndef mul(a, b):\\n    return a * b\\n')")
+        self.assertEqual(report["status"], "ok")
+
+    def test_abc_without_abstractmethod_is_a_stub(self):
+        code = ("open('calc.py','a').write('\\n\\nfrom abc import ABC\\nclass Base(ABC):\\n"
+                "    def run(self):\\n        pass\\n')")
+        report, _ = self.go(code)
+        self.assertEqual(report["status"], "stub-rejected")
+
+    def test_unfinished_worker_not_committed_when_verification_is_on(self):
+        report, _ = self.go("open('calc.py','a').write('# half'); raise SystemExit(4)")
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("沒有正常結束", report["commit"])
+
+    def test_timeout_kills_grandchildren_quickly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            child = ("import subprocess, sys, time;"
+                     "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(40)']); time.sleep(40)")
+            start = time.monotonic()
+            result = gates.run_logged([sys.executable, "-c", child], Path(tmp), Path(tmp) / "t.log", 3)
+            self.assertLess(time.monotonic() - start, 20)
+            self.assertIsNone(result["exit"])
+            self.assertIn("timeout", Path(tmp, "t.log").read_text(encoding="utf-8"))
+
+    def test_quoted_command_on_windows(self):
+        self.assertEqual(gates.verify_command(Path("."), {"command": 'python -m pytest -k "a b"'})[-1], "a b")
 
 
 if __name__ == "__main__":

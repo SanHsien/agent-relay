@@ -37,7 +37,7 @@ LOW_ZH = ("改名", "錯字", "格式化", "加註解", "排版", "批次改名"
 _EN_HIGH = re.compile(r"\b(" + "|".join(re.escape(w) for w in HIGH_EN) + r")\b")
 _EN_LOW = re.compile(r"\b(" + "|".join(re.escape(w) for w in LOW_EN) + r")\b")
 # Paths, file names and code spans describe the work's location, not its difficulty.
-_NOISE = re.compile(r"`[^`]*`|\S*[/\\]\S*|\S+\.(?:md|py|ts|js|json|toml|ya?ml|txt|cs|go|rs)\b")
+_NOISE = re.compile(r"`[^`]*`|[A-Za-z0-9_.~-]*[/\\][A-Za-z0-9_./\\~-]*|[A-Za-z0-9_.-]+\.(?:md|py|ts|js|json|toml|ya?ml|txt|cs|go|rs)\b")
 
 # (runtime, model, effort) per complexity, best first. Models are the runtime's own ids.
 ROUTES = {
@@ -132,11 +132,13 @@ def claude_quota(status_file: Path | None = None, now: float | None = None) -> Q
     now = now or time.time()
     path = status_file or Path.home() / ".claude" / "agentdeck-status.json"
     try:
-        data = _dict(json.loads(path.read_text(encoding="utf-8")))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Quota("claude")
     except (OSError, ValueError):
         return Quota("claude", source="讀取失敗")
+    if not isinstance(data, dict) or not isinstance(data.get("rate_limits"), dict):
+        return Quota("claude", source="讀取失敗")  # valid JSON, wrong shape
     limits = _dict(data.get("rate_limits"))
     five, week = _dict(limits.get("five_hour")), _dict(limits.get("seven_day"))
     f_used, f_reset = _window(_num(five.get("used_percentage")), _num(five.get("resets_at")), now)
@@ -157,7 +159,7 @@ def codex_quota(command: list[str] | None, now: float | None = None, timeout: fl
         data = _dict(json.loads(proc.stdout)) if proc.returncode == 0 else None
     except (subprocess.SubprocessError, OSError, ValueError):
         data = None
-    if data is None:
+    if data is None or not isinstance(data.get("usage"), dict):
         return Quota("codex", source="讀取失敗")
     usage = _dict(data.get("usage"))
     primary, secondary = _dict(usage.get("primary_window")), _dict(usage.get("secondary_window"))
