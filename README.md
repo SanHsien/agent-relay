@@ -47,6 +47,21 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
                                        └─ Worker read → 施工 → send --kind result → ack
 ```
 
+## 功能地圖
+
+| 功能 | 指令／設定 | SPEC | 實測紀錄 | ai-inbox 任務 |
+| --- | --- | --- | --- | --- |
+| 寄信、收信、跨機器同步 | `send`／`inbox`／`read`／`ack`／`sync` | 1–3 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-01 |
+| 門鈴（通知、Telegram、交接卡）、排程輪詢 | `watch`、`poller install` | 4–5 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-02 |
+| 信件自動開新 Session 施工（worktree） | `send --run claude\|codex\|agy`、`dispatch` | 7 | [Phase 2](docs/evidence/2026-10-20-phase2.md) | T-20261018-15、T-20261017-31 |
+| 新 Session 自動接手（交接包） | `context`、`hooks/session_start.py` | 8 | [T-08](docs/evidence/2026-10-20-t08-handover.md) | T-20261019-08 |
+| 簽出鎖、範圍檢查、打卡紀錄 | `--path`、`claim`／`claims`／`release` | 9 | [T-07](docs/evidence/2026-10-20-t07-checkout.md) | T-20261019-07 |
+| 額度感知分派、斷線續跑 | `--run auto`、`advise` | 10 | [T-16](docs/evidence/2026-10-20-t16-advisor.md) | T-20261018-16 |
+| 驗收閘門（TDD、禁止空殼、真實 log） | `--tdd`、`dispatch.verify` | 11 | [T-18](docs/evidence/2026-10-20-t18-gates.md) | T-20261018-18 |
+| 回流升級除錯 | `dispatch.escalation` | 12 | [基準報告](docs/reports/2026-10-20-space-bunny-benchmark.md) | T-20261017-32 |
+
+Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
+
 ## 生態系總目錄
 
 流水線分三個階段，每階段復用下列現有 repo。「轉接層」欄是各 repo 要加的那一層；完成後在 ai-inbox 對應任務附證據。
