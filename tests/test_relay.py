@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -146,6 +147,34 @@ class TwoMachineGitTests(Base):
         for store in (self.a, self.b):
             self.assertEqual(sorted(e["id"] for _, e in Store(store).list("x")), sorted(e["id"] for e in later))
             self.assertEqual([e["id"] for _, e in Store(store).list("x", ("done",))], [first["id"]])
+
+    def test_concurrent_processes_on_one_clone(self):
+        # Seen live (T-09): five dispatch tabs pulling one clone at once; four failed with
+        # "Cannot rebase onto multiple branches". The store lock serialises them.
+        for n in range(3):
+            Store(self.a).deliver(envelope.build(sender="a", to="x", subject=str(n), body=""))
+            gitsync.sync(self.a)
+        code = ("import sys; sys.path.insert(0, sys.argv[1]);"
+                "from agent_relay import gitsync, envelope; from agent_relay.store import Store;"
+                "from pathlib import Path; b = Path(sys.argv[2]);"
+                "Store(b).deliver(envelope.build(sender='b', to='y', subject='p', body=''));"
+                "gitsync.sync(b, 'concurrent')")
+        procs = [subprocess.Popen([sys.executable, "-c", code, str(ROOT), str(self.b)],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True) for _ in range(5)]
+        outputs = [p.communicate(timeout=300)[0] for p in procs]
+        self.assertEqual([p.returncode for p in procs], [0] * 5, outputs)
+        self.assertFalse((self.b / ".git" / "agent-relay-sync.lock").exists())
+        gitsync.pull(self.a)
+        self.assertEqual(len(Store(self.a).list("y")), 5)
+        self.assertEqual(len(Store(self.a).list("x")), 3)
+
+    def test_stale_store_lock_is_broken(self):
+        lock = self.b / ".git" / "agent-relay-sync.lock"
+        lock.write_text("crashed", encoding="utf-8")
+        old = time.time() - gitsync.LOCK_STALE_S - 10
+        os.utime(lock, (old, old))
+        gitsync.pull(self.b)
+        self.assertFalse(lock.exists())
 
     def test_only_mailboxes_committed(self):
         (self.a / "other.txt").write_text("not mine")

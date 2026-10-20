@@ -8,16 +8,89 @@ store that shares a repository with other files never commits anything else.
 
 from __future__ import annotations
 
+import functools
+import os
+import secrets
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 PUSH_RETRIES = 3
 TIMEOUT = 120
 SHARED_DIRS = ("mailboxes", "claims", "audit", "hosts")  # everything relay shares between machines
+LOCK_WAIT_S = 300
+LOCK_STALE_S = 900  # longer than any pull + commit + push with retries
 
 
 class SyncError(RuntimeError):
     pass
+
+
+_held = threading.local()
+_thread_lock = threading.RLock()
+
+
+def _locked(func):
+    """One store operation at a time on this machine.
+
+    The doorbell opens a tab per task, and each tab pulls and pushes the same clone:
+    concurrent `git pull`s race on FETCH_HEAD ("Cannot rebase onto multiple branches")
+    and index.lock. An O_EXCL file in .git serialises them across processes; nested
+    calls (sync -> pull) in the same thread do not take it twice.
+    """
+    @functools.wraps(func)
+    def wrapper(root, *args, **kwargs):
+        git_dir = Path(root) / ".git"
+        if not git_dir.is_dir():
+            return func(root, *args, **kwargs)
+        with _thread_lock:
+            depth = getattr(_held, "depth", 0)
+            if depth:
+                _held.depth = depth + 1
+                try:
+                    return func(root, *args, **kwargs)
+                finally:
+                    _held.depth -= 1
+            lock = git_dir / "agent-relay-sync.lock"
+            token = _acquire(lock)
+            _held.depth = 1
+            try:
+                return func(root, *args, **kwargs)
+            finally:
+                _held.depth = 0
+                _release(lock, token)
+    return wrapper
+
+
+def _acquire(lock: Path) -> str:
+    token = f"{os.getpid()}-{secrets.token_hex(4)}"
+    give_up = time.time() + LOCK_WAIT_S
+    while True:
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(token)
+            return token
+        except FileExistsError:
+            try:
+                if time.time() - lock.stat().st_mtime > LOCK_STALE_S:  # its owner crashed
+                    os.replace(lock, lock.with_name(f"{lock.name}.stale-{token}"))
+                    os.unlink(lock.with_name(f"{lock.name}.stale-{token}"))
+                    continue
+            except OSError:
+                continue
+            if time.time() > give_up:
+                raise SyncError(f"another relay process holds {lock} for more than {LOCK_WAIT_S} s")
+            time.sleep(0.5)
+
+
+def _release(lock: Path, token: str) -> None:
+    try:
+        if lock.read_text(encoding="utf-8") == token:
+            lock.unlink()
+    except OSError:
+        pass
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -51,6 +124,7 @@ def _rebasing(root: Path) -> bool:
     return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
 
 
+@_locked
 def pull(root: Path) -> None:
     """Rebase onto the remote. A failed rebase is aborted so the store is never left stuck."""
     root = Path(root)
@@ -66,6 +140,7 @@ def pull(root: Path) -> None:
         raise
 
 
+@_locked
 def commit(root: Path, message: str) -> bool:
     """Stage relay's own folders only and commit. Returns False when there was nothing to commit."""
     root = Path(root)
@@ -93,6 +168,7 @@ def _in_head(root: Path, folder: str) -> bool:
     return bool(_git(root, "ls-tree", "--name-only", "HEAD", "--", folder, check=False).stdout.strip())
 
 
+@_locked
 def push(root: Path) -> None:
     root = Path(root)
     if not (is_repo(root) and has_remote(root)):
@@ -120,6 +196,7 @@ def clone(url: str, dest: Path, branch: str) -> None:
         raise SyncError(f"git clone failed: {proc.stderr.strip()}")
 
 
+@_locked
 def sync(root: Path, message: str = "relay: sync mailboxes") -> bool:
     """Commit local mailbox changes, pull others', push. Returns True if we committed."""
     root = Path(root)
