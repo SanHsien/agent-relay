@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import advisor, config, doorbell, envelope, gitsync, locks, poller, signing
 from . import context as handover
+from . import gc as relay_gc
 from . import status as relay_status
 from . import accept as accepter
 from . import dispatch as dispatcher
@@ -326,6 +327,20 @@ def cmd_status(args, cfg) -> int:
     return 8 if any(h["stale"] for h in data["hosts"]) or data["overdue"] else 0
 
 
+def cmd_gc(args, cfg) -> int:
+    agent = _agent(args, cfg)
+    try:
+        actions = relay_gc.plan(cfg, agent, args.older_than, args.repo)
+    except relay_gc.GcError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    if args.apply:
+        relay_gc.apply(actions)
+        if any(a["kind"] == "done-mail" and a.get("done") for a in actions):
+            _sync(args, cfg, f"relay: {agent} gc {sum(a['kind'] == 'done-mail' for a in actions)} done messages")
+    _out(args, actions, relay_gc.render(actions, args.apply))
+    return 0 if all(a.get("done", True) for a in actions) else 9
+
+
 def cmd_watch(args, cfg) -> int:
     agent = _agent(args, cfg)
     while True:
@@ -460,6 +475,13 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--stale-minutes", type=float, default=relay_status.DEFAULT_STALE_MIN,
                    help="a heartbeat older than this counts as a stopped receiver")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("gc", help="remove finished dispatch worktrees, branches, run records and old done mail")
+    s.add_argument("--older-than", type=float, default=relay_gc.DEFAULT_DAYS, help="days since the run replied")
+    s.add_argument("--repo", action="append", default=[], help="also look in this repo (repo_roots are scanned)")
+    s.add_argument("--agent")
+    s.add_argument("--apply", action="store_true", help="really delete (default: dry run)")
+    s.set_defaults(func=cmd_gc)
 
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")

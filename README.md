@@ -66,6 +66,7 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 | Codex 工人（workspace-write 釘住 worktree） | `send --run codex` | 7 | [T-04](docs/evidence/2026-10-21-t04-codex.md) | T-20261021-04 |
 | 並發／每日上限、防重跑 | `dispatch.max_concurrent`、`daily_limit` | 15 | [T-09](docs/evidence/2026-10-21-t09-limits.md) | T-20261021-09 |
 | 總覽與收件端心跳 | `status`、`hosts/` | 16 | [T-10](docs/evidence/2026-10-21-t10-status.md) | T-20261021-10 |
+| 清理 worktree／分支／run 紀錄 | `gc` | 17 | [T-11](docs/evidence/2026-10-21-t11-gc.md) | T-20261021-11 |
 
 Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
 

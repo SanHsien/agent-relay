@@ -428,3 +428,23 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 - 本機派工：`runs/*/state.json` 裡 phase 為 `running`／`queued` 的工單，連同期限與 pid 是否存活。已過期的會列為「已逾期」；下一輪 `watch` 會補一封 `interrupted`（第 7 節）。
 - 退出碼：有心跳逾時或逾期工單時回傳 8，方便排程或腳本判斷；一切正常回傳 0。
 - `hosts/` 跟 `mailboxes/`、`claims/`、`audit/` 一樣，由 relay 自己 commit。
+
+## 17. 清理（`relay gc`）
+
+```text
+relay gc [--older-than 14] [--repo <repo> ...] [--apply]
+```
+
+預設只列出會刪掉什麼（dry run），加 `--apply` 才真的刪除。只處理「已回信超過 N 天」的派工；判斷依據是本機 `runs/<id>/state.json` 的 phase 為 `replied`，以 `finished` 時間計。下列項目不會碰：還在 `running`／`queued` 的派工、`new`／`cur` 的信，以及沒有本機紀錄的 worktree。
+
+| 項目 | 條件 |
+| --- | --- |
+| worktree `<repo>/.relay-worktrees/<id>` | 已回信超過 N 天。repo 來源是 `--repo` 與 `dispatch.repo_roots` 底下各 repo |
+| 本機分支 `relay/<id>` | 同上，先刪 worktree 再刪分支 |
+| origin 上的 `relay/<id>` | 同上，而且必須是**這台機器推上去的**（state 記錄的 `pushed_ref`），還要指揮者已回 `accepted:`／`rejected:` 的 note。指揮者還沒驗收的分支保留 |
+| `runs/<id>/` | 同上 |
+| 自己信箱 `done/` 的信 | `created_at` 超過 N 天。刪除後由 relay commit 並同步，git 歷史仍保留 |
+| `accepts/<回信 id>/`（指揮者端驗收 log） | 最後修改超過 N 天 |
+
+- N 不能短於 `dispatch.max_age_hours`（預設 7 天）。本機 run 紀錄是擋重放簽章信的依據（第 13 節），在信件還可能被接受的期間內不能刪。
+- git 操作會關掉 hooks。某一項失敗時只記錄在該項，不影響其他項；有失敗時退出碼為 9。

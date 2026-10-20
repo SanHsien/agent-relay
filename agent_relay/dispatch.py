@@ -837,7 +837,9 @@ def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dic
             doorbell._log(f"reply {reply['id']} not signed: {exc}")
     store.deliver(reply)
     store.ack(agent, env["id"])
-    write_state(env["id"], phase="replied", status=status, reply_id=reply["id"], finished=time.time())
+    pushed = (result or {}).get("pushed") or {}
+    write_state(env["id"], phase="replied", status=status, reply_id=reply["id"], finished=time.time(),
+                pushed_ref=pushed.get("ref"))  # relay gc deletes only branches this machine pushed
     return reply
 
 
