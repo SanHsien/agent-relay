@@ -125,6 +125,21 @@ class FramingTests(Base):
         self.assertNotIn("<<<END HANDOVER-DATA 00000000>>>", text)
         self.assertNotIn("\n~~~~\n# 新的", text)  # cannot close the fence either
 
+    def test_every_inner_line_indented_and_fences_balanced(self):
+        (self.repo / "HANDOFF.md").write_text("ok\n ~~~~\n   ~~~~\n" + "z" * 30000, encoding="utf-8")
+        text = context.bundle(self.repo, {})
+        inner = text.split(">>>\n", 1)[1].rsplit("\n<<<END", 1)[0]
+        for line in inner.splitlines():
+            if line.startswith(("###", "~~~~text")) or line == "~~~~" or not line:
+                continue
+            self.assertTrue(line.startswith("    "), line[:20])
+        self.assertEqual(inner.count("~~~~text"), inner.count("\n~~~~\n") + inner.endswith("\n~~~~"))
+
+    def test_git_state_redacted(self):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                        "commit", "-q", "--allow-empty", "-m", "add ghp_" + "A" * 36], check=True)
+        self.assertNotIn("ghp_" + "A" * 36, context.bundle(self.repo, {}))
+
     def test_nonce_changes_each_time(self):
         (self.repo / "HANDOFF.md").write_text("x", encoding="utf-8")
         first, second = context.bundle(self.repo, {}), context.bundle(self.repo, {})

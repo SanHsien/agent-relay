@@ -191,7 +191,7 @@ git 狀態                                  分支、已追蹤但未提交的檔
 - **只讀**：不寫任何檔案。符號連結、以及實際路徑跑到 repo 或 vault 外面的檔案都不讀；每個檔最多讀 16 KB；含 NUL 的二進位檔跳過。
 - **有上限**：每段最多 4000 字；全部最多 14000 字（hook 模式 9000 字，避免被 Claude Code 截斷）。整份交接包有時間上限（派工 15 秒、hook 8 秒），每個外部指令最多 5 秒；上一個 session 只試一次，失敗就略過。git 用 `status -uno`，不掃未追蹤檔。
 - **遮罩**：每個來源先遮罩再截斷。遮的形狀：`sk-`、`ghp_`／`github_pat_`、`xox?-`、`AKIA`、`AIza`、`ya29.`、JWT、PEM 私鑰、Bearer、Telegram bot token、URL 裡的 `user:pass@`、`password=`／`token=`／`*_KEY=` 這類鍵值。
-- **資料界線**：整份放在 `<<<HANDOVER-DATA <隨機 nonce>>>` … `<<<END HANDOVER-DATA <nonce>>>` 之間，前面一句說明這是資料、不是指令。每個來源各自放在 `~~~~` 區塊裡；內容中的 `~~~` 行首會被縮排、`<<<`／`>>>` 換成相似字元，所以內容無法提早結束區塊。派工 prompt 的規則行也會再提醒一次。
+- **資料界線**：整份放在 `<<<HANDOVER-DATA <隨機 nonce>>>` … `<<<END HANDOVER-DATA <nonce>>>` 之間，前面一句說明這是資料、不是指令。每個來源各自放在 `~~~~` 區塊裡，內容每行縮排 4 格（結尾標記最多只能縮排 3 格，所以內容關不掉區塊），`<<<`／`>>>` 換成相似字元；超過總上限時整段丟掉尾端的來源，不會從區塊中間切斷。git 狀態（commit 訊息）也經過遮罩。派工 prompt 的規則行也會再提醒一次。
 - hook 收不到 `cwd`、payload 壞掉、或什麼都沒有可交接時，不輸出任何東西；任何錯誤都 exit 0（`relay context --hook` 和 `hooks/session_start.py` 都一樣）。payload 一律以 UTF-8 解讀，中文路徑可用。
 - 專案 key 照 Claude Code 的規則：路徑中每個非英數字元換成 `-`；同時比對原路徑與解析後路徑（subst、對應的網路磁碟機）。
 - Codex、agy 沒有 SessionStart hook：經 `relay dispatch` 派工時一樣拿得到交接包；直接開時可以先跑 `python -m agent_relay context` 再貼。

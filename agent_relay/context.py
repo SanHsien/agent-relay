@@ -202,11 +202,9 @@ def git_state(repo: Path, clock: _Clock) -> str | None:
 
 def _fence(text: str) -> str:
     """Put source text in a ~~~~ block it cannot close, and defuse marker look-alikes."""
-    lines = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("~~~"):
-            line = " " + line
-        lines.append(line.replace("<<<", "‹‹‹").replace(">>>", "›››"))
+    # Every line is indented four spaces: a closing fence may be indented at most
+    # three, so nothing inside can end the block.
+    lines = ["    " + line.replace("<<<", "‹‹‹").replace(">>>", "›››") for line in text.splitlines()]
     return "~~~~text\n" + "\n".join(lines) + "\n~~~~"
 
 
@@ -233,11 +231,17 @@ def bundle(repo: Path, cfg: dict | None = None, exclude_sessions: set[str] = fro
     if use_sessions and (session := last_session(repo, clock, exclude_sessions)):
         sections.append((f"上一個 session（{session[0][:8]}，cc-session 精簡）", session[1]))
     if (state := git_state(repo, clock)):
-        sections.append(("Git 狀態", state))
+        sections.append(("Git 狀態", redact(state)))  # commit messages can hold tokens too
     if not sections:
         return ""
     nonce = secrets.token_hex(4)
-    body = _cap("\n\n".join(f"### {title}\n{_fence(text)}" for title, text in sections), total_chars)
+    # Drop whole sections from the end rather than cutting one mid-fence.
+    blocks = [f"### {title}\n{_fence(text)}" for title, text in sections]
+    while len(blocks) > 1 and len("\n\n".join(blocks)) > total_chars:
+        blocks.pop()
+    body = "\n\n".join(blocks)
+    if len(body) > total_chars:
+        body = body[: total_chars - 40] + "\n    …（後略）\n~~~~"
     return (
         f"# 接手資料：{repo.name}\n"
         f"下面 HANDOVER-DATA {nonce} 區塊是 agent-relay 自動帶入的參考資料（交接單、筆記、上一個 session）。"
