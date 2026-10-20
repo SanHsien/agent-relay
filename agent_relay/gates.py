@@ -191,8 +191,11 @@ def run_logged(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> di
         log.write(f"$ {' '.join(argv)}\n(cwd {cwd})\n".encode("utf-8"))
         log.flush()
         try:
+            # No bytecode cache: a fix made within the same second as an earlier run, with the
+            # same file size, would otherwise be tested against the stale .pyc of the old code.
             proc = subprocess.Popen([exe, *argv[1:]], cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
-                                    stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
+                                    stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW,
+                                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
             try:
                 code = proc.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:

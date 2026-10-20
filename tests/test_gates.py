@@ -215,6 +215,11 @@ class GateReviewTests(DispatchGateTests):
             self.assertIsNone(result["exit"])
             self.assertIn("timeout", Path(tmp, "t.log").read_text(encoding="utf-8"))
 
+    def test_gate_runs_leave_no_bytecode_cache(self):
+        report, _ = self.go("open('calc.py','a').write('\\n\\ndef mul(a, b):\\n    return a * b\\n')")
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(list(Path(report["worktree"]).rglob("__pycache__")), [])
+
     def test_quoted_command_on_windows(self):
         self.assertEqual(gates.verify_command(Path("."), {"command": 'python -m pytest -k "a b"'})[-1], "a b")
 
