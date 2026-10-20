@@ -128,6 +128,25 @@ class TwoMachineGitTests(Base):
         gitsync.pull(self.a)
         self.assertEqual(len(Store(self.a).list("x")), 2)
 
+    def test_ack_of_last_new_message_and_concurrent_mail_do_not_conflict(self):
+        # Seen live: B acked the only message in x/new/ (git: "new/ renamed to done/") while A
+        # delivered more mail to x/new/; the rebase then failed with a file-location conflict.
+        first = envelope.build(sender="a", to="x", subject="1", body="")
+        Store(self.a).deliver(first)
+        gitsync.sync(self.a)
+        gitsync.pull(self.b)
+        Store(self.b).ack("x", first["id"])
+        gitsync.commit(self.b, "ack")
+        later = [envelope.build(sender="a", to="x", subject=str(n), body="") for n in (2, 3)]
+        for env in later:
+            Store(self.a).deliver(env)
+        gitsync.sync(self.a)
+        gitsync.sync(self.b)  # must rebase cleanly
+        gitsync.pull(self.a)
+        for store in (self.a, self.b):
+            self.assertEqual(sorted(e["id"] for _, e in Store(store).list("x")), sorted(e["id"] for e in later))
+            self.assertEqual([e["id"] for _, e in Store(store).list("x", ("done",))], [first["id"]])
+
     def test_only_mailboxes_committed(self):
         (self.a / "other.txt").write_text("not mine")
         Store(self.a).deliver(envelope.build(sender="a", to="x", subject="1", body=""))

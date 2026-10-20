@@ -57,7 +57,9 @@ def pull(root: Path) -> None:
     if not (is_repo(root) and has_remote(root)):
         return
     try:
-        _git(root, "pull", "--rebase", "--autostash", "--quiet")
+        # No directory-rename detection: acking the last message in new/ looks like "new/
+        # renamed to done/" to git, and then mail another machine added to new/ conflicts.
+        _git(root, "-c", "merge.directoryRenames=false", "pull", "--rebase", "--autostash", "--quiet")
     except SyncError:
         if _rebasing(root):
             _git(root, "rebase", "--abort", check=False)
