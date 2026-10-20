@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -205,8 +206,10 @@ def cmd_send(args, cfg) -> int:
 def cmd_accept(args, cfg) -> int:
     try:
         report = accepter.accept(cfg, _agent(args, cfg), args.id, Path(args.repo), args.into, sync=not args.no_sync)
-    except accepter.AcceptError as exc:  # the reply itself could not be read: nothing was recorded
+    except (accepter.AcceptError, StoreError) as exc:  # a local problem: nothing was recorded or changed
         raise SystemExit(f"error: {exc}") from exc
+    except subprocess.SubprocessError as exc:  # git timed out before anything was changed
+        raise SystemExit(f"error: {type(exc).__name__}: {exc}") from exc
     lines = [f"{k}: {v}" for k, v in report.items() if k not in ("verify", "notes")]
     if report.get("verify"):
         lines.append(f"verify: {report['verify']['command']} -> exit {report['verify']['exit']} "
