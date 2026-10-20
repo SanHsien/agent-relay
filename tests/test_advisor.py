@@ -151,7 +151,8 @@ class DispatchAutoTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "i"], check=True)
         self.cfg = {"store": str(d / "store"), "agent": "cc", "doorbells": [],
-                    "dispatch": {"runtimes": ["claude", "codex"], "repo_roots": [str(d / "repos")], "context": False}}
+                    "dispatch": {"runtimes": ["claude", "codex"], "repo_roots": [str(d / "repos")], "context": False,
+                                 "senders": ["commander"], "require_signature": False}}
         self.store = Store(self.cfg["store"])
 
     def send(self, subject):

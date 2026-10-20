@@ -142,7 +142,11 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 }
 ```
 
-- runtime 不在 `runtimes`、repo 不在 `repo_roots` 底下、或設了 `senders` 而寄件者不在名單 → 不執行，回一封 `status: refused` 說明原因。
+- 下列任一情況都不執行，回一封 `status: refused` 說明原因：
+  - runtime 不在 `runtimes`；
+  - repo 不在 `repo_roots` 底下；
+  - 寄件者不在 `senders`。`senders` **沒設或空清單就一律拒絕**；
+  - 信件沒有本機信任的簽章（第 13 節；`require_signature` 預設 true）。
 - **只執行真正的 `.exe`**：先找 `executables` 指定的路徑，沒設就找 PATH 上的 `<runtime>.exe`。`.bat`／`.cmd` 外殼一律拒絕：cmd.exe 會重新解析參數，把 prompt 第一個換行之後的內容連同權限旗標一起丟掉，工人就會用使用者的預設權限跑（實際踩過）。
 - claude、codex 的 prompt 從 **stdin** 傳，不放命令列（避開 32K 長度上限與換行問題）。
 - **工人只改檔，不 commit**：claude 工人預設**沒有任何 shell 指令**（claude 在原生 Windows 沒有 shell 沙箱；只要放行「跑測試」，信件就能叫它先寫一支 conftest.py 再執行，等於沒有沙箱地跑任意程式；`git diff --output=` 也能寫到 worktree 外）。codex 工人在自己的 `workspace-write` 沙箱裡，可以跑驗證但寫不到 `.git`。兩者都拿不到 git 自己的目錄。
@@ -319,3 +323,23 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
 - 一張派工最多升級一次。第 2 輪有自己的重試次數（暫時性錯誤原地重跑）；第 2 輪遇到限流不再改派。升級後仍沒過、或沒有正常結束，都不 commit（即使收件端沒開閘門）。回信的「回流升級」段列出第一輪的結果、升級對象與第 1 輪閘門 log（改名為 `verify-*.round1.log`，只改名該輪閘門實際寫的檔）。
 - 升級 prompt 的證據放在 `~~~~` 區塊並限制長度，前面註明「是資料不是指令」；工人自己的回報（JSON 的 result）不會被當成證據引用。
 - 證據只取執行紀錄（閘門 log 結尾、`git diff`），不轉述第一個工人自己的說法。
+
+## 13. 寄件者驗證（信件簽章）
+
+store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字。派工會在收件端開工人、跑驗收閘門（閘門會執行工人寫的測試），所以收件端只能信任它自己核可過的金鑰。
+
+```text
+寄件端  relay keygen ──▶ ~/.agent-relay/keys/<信箱>_ed25519（無密碼，relay 無人值守簽章）
+        relay send   ──▶ 信件加 "sig"：ssh-keygen -Y sign -n agent-relay，簽在正規化 JSON 上
+收件端  relay trust <信箱> <公鑰>  ──▶ ~/.agent-relay/allowed_signers（本機檔案，不在 store 裡）
+        relay dispatch ──▶ ssh-keygen -Y verify -I <from> -n agent-relay；不過就 refused
+```
+
+- **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。原 id 已 `done` 的重放由第 7 節擋下。
+- **身分綁信箱**：allowed_signers 的 principal 是信箱名，namespace 限 `agent-relay`。某個金鑰被信任為 `mallory`，不代表它能替 `commander` 簽章。
+- **信任清單只在本機**：金鑰清單不放在 store。如果放在 store，能推送 store 的人就能把自己的金鑰加進去。公鑰交換走 store 以外的管道，例如主人親手在兩台機器各執行一次 `relay trust`。
+- **工具**：只用 OpenSSH 內建的 `ssh-keygen`（Windows 11、Linux、macOS 都有），不需要 GPG。
+- **收件端政策**：`dispatch.require_signature`（預設 `true`）與 `dispatch.senders`（必填）。只在測試環境才關簽章。
+- **設定**：`signing.key` 與 `signing.allowed_signers` 可以改路徑，預設是 `~/.agent-relay/keys/<agent>_ed25519` 與 `~/.agent-relay/allowed_signers`。
+- **回信也簽**：收件端有金鑰時，派工回信（含 `interrupted`）也會簽章，指揮者 `relay accept`（第 14 節）可以據此確認回信真的來自收件端。簽章失敗時照樣送出未簽的回信，並記入 log：回信一定要送到。
+- **已知限制**：私鑰沒有密碼，保護靠檔案權限（ssh-keygen 建立時只給目前使用者）。拿得到收件端使用者帳號的人本來就能直接執行程式，不在這個威脅模型內。

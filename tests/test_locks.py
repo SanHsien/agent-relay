@@ -159,7 +159,8 @@ class DispatchClaimTests(Base):
     def setUp(self):
         super().setUp()
         self.cfg = {"store": str(self.store), "agent": "cc", "doorbells": [],
-                    "dispatch": {"runtimes": ["claude"], "repo_roots": [str(self.dir / "repos")], "context": False}}
+                    "dispatch": {"runtimes": ["claude"], "repo_roots": [str(self.dir / "repos")], "context": False,
+                                 "senders": ["commander"], "require_signature": False}}
         self.mailbox = Store(self.store)
 
     def task(self, paths):

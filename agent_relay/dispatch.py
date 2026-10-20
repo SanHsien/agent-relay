@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import advisor, config, context, doorbell, envelope, gates, gitsync, locks
+from . import advisor, config, context, doorbell, envelope, gates, gitsync, locks, signing
 from .context import redact
 from .store import Store
 
@@ -153,15 +153,24 @@ def validate_spec(spec: object) -> dict:
     return spec
 
 
-def policy_check(env: dict, spec: dict, policy: dict) -> Path:
+def policy_check(env: dict, spec: dict, policy: dict, allowed_signers: Path | None = None) -> Path:
     """Return the resolved repo, or raise when the receiver has not allowed this.
 
     Runs before anything else, `runtime: auto` included: an unauthorised sender gets
-    'refused', never a look at this machine's quotas.
+    'refused', never a look at this machine's quotas. Senders are deny-by-default,
+    and `from` only counts when a key this machine trusts signed the envelope:
+    anyone who can push to the store can write any `from`.
     """
     senders = policy.get("senders")
-    if senders is not None and env["from"] not in senders:
+    if not isinstance(senders, list) or not senders:
+        raise DispatchError("dispatch.senders is not set: this machine accepts dispatch tasks from no one")
+    if env["from"] not in senders:
         raise DispatchError(f"sender {env['from']!r} not in dispatch.senders {senders}")
+    if policy.get("require_signature", True):
+        problem = signing.verify(env, allowed_signers or config.home() / "allowed_signers")
+        if problem:
+            raise DispatchError(f"signature check failed for sender {env['from']!r}: {problem} "
+                                "(see SPEC section 13; dispatch.require_signature)")
     if policy.get("require_paths") and not spec.get("paths"):
         raise DispatchError("this machine requires dispatch.paths (the files the worker may change)")
     allowed = policy.get("runtimes") or []
@@ -625,10 +634,16 @@ def read_state(env_id: str) -> dict | None:
         return None
 
 
-def _reply(store: Store, agent: str, env: dict, status: str, body: str) -> dict:
+def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dict | None = None) -> dict:
     reply = envelope.build(sender=agent, to=env["from"], subject=f"{status}: {env['subject']}"[:200],
                            body=redact(body), kind="result", reply_to=env["id"], thread=env.get("thread"),
                            priority="normal" if status == "ok" else "high")
+    key = signing.settings(cfg, config.home())[0] if cfg else None
+    if key:
+        try:
+            reply = signing.sign(reply, key)
+        except signing.SigningError as exc:  # a reply must always go out; the sender sees it unsigned
+            doorbell._log(f"reply {reply['id']} not signed: {exc}")
     store.deliver(reply)
     store.ack(agent, env["id"])
     write_state(env["id"], phase="replied", status=status, reply_id=reply["id"], finished=time.time())
@@ -674,7 +689,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
         decision = None
-        repo = policy_check(env, spec, cfg.get("dispatch") or {})  # first: who may ask, which repo
+        repo = policy_check(env, spec, cfg.get("dispatch") or {}, signing.settings(cfg, config.home())[1])  # first: who may ask, which repo
         if spec["runtime"] == "auto":
             # Pick with this machine's quotas: it is this machine's accounts that will pay.
             decision = advisor.decide(env["subject"], env["body"], spec.get("paths"), spec.get("mode", "build"),
@@ -863,7 +878,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 locks.release(Path(cfg["store"]), claim, changed=changed, env=env_id, status=report["status"])
             except OSError as exc:
                 doorbell._log(f"dispatch {env_id}: release failed: {exc}")
-    report["reply_id"] = _reply(store, agent, env, report["status"], body)["id"]
+    report["reply_id"] = _reply(store, agent, env, report["status"], body, cfg)["id"]
     if sync:
         _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")
     return report
@@ -935,7 +950,7 @@ def reap_interrupted(agent: str, cfg: dict, now: float | None = None, rung: list
                         "可以重寄，或在收件端手動 `relay dispatch <id>`。\n")
             else:
                 continue
-            _reply(store, agent, env, "interrupted", body)
+            _reply(store, agent, env, "interrupted", body, cfg)
             reaped.append(env["id"])
         except Exception as exc:  # noqa: BLE001 - one bad message must not stop the watch
             doorbell._log(f"reap {env['id']} skipped: {type(exc).__name__}: {exc}")

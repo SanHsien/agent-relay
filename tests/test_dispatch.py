@@ -1,4 +1,5 @@
 import json
+import shutil
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 # Never touch the real ~/.agent-relay: every test run gets its own home.
 os.environ["AGENT_RELAY_HOME"] = tempfile.mkdtemp(prefix="agent-relay-test-home-")
 
-from agent_relay import cli, dispatch, doorbell, envelope  # noqa: E402
+from agent_relay import cli, dispatch, doorbell, envelope, signing  # noqa: E402
 from agent_relay.store import Store, StoreError  # noqa: E402
 
 NL = chr(10)
@@ -58,7 +59,8 @@ class DispatchBase(unittest.TestCase):
         git("add", ".", cwd=self.repo)
         git("commit", "--quiet", "-m", "init", cwd=self.repo)
         self.cfg = {"store": str(self.dir / "store"), "agent": "claude-code", "doorbells": [],
-                    "dispatch": {"runtimes": ["claude"], "repo_roots": [str(self.dir / "repos")]}}
+                    "dispatch": {"runtimes": ["claude"], "repo_roots": [str(self.dir / "repos")],
+                                 "senders": ["commander"], "require_signature": False}}
         self.store = Store(self.cfg["store"])
 
     def send_task(self, sender="commander", **spec):
@@ -230,6 +232,52 @@ class HermesTests(DispatchBase):
             report = dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False)
         self.assertEqual(report["status"], "failed")
         self.assertEqual(report["usage"], [{"attempt": 1, "completed": False}])
+
+
+@unittest.skipUnless(shutil.which("ssh-keygen"), "ssh-keygen not installed")
+class SenderTrustTests(DispatchBase):
+    """T-20261021-07: deny-by-default senders and signed envelopes."""
+
+    def setUp(self):
+        super().setUp()
+        keys = self.dir / "keys"
+        self.commander_key, self.mallory_key, self.receiver_key = (keys / n for n in ("commander", "mallory", "receiver"))
+        self.allowed = self.dir / "allowed_signers"  # the receiver's trust list
+        signing.trust(self.allowed, "commander", signing.keygen(self.commander_key, "commander"))
+        signing.keygen(self.mallory_key, "mallory")
+        self.commander_trusts = self.dir / "commander_allowed_signers"
+        signing.trust(self.commander_trusts, "claude-code", signing.keygen(self.receiver_key, "claude-code"))
+        self.cfg["dispatch"].pop("require_signature")
+        self.cfg["signing"] = {"key": str(self.receiver_key), "allowed_signers": str(self.allowed)}
+
+    def send_signed(self, key):
+        env = envelope.build(sender="commander", to="claude-code", subject="make proof", body="write proof.txt",
+                             kind="task", dispatch={"runtime": "claude", "repo": str(self.repo), "timeout_minutes": 1})
+        env = signing.sign(env, key) if key else env
+        self.store.deliver(env)
+        return env
+
+    def test_signed_task_runs_and_reply_is_signed(self):
+        env = self.send_signed(self.commander_key)
+        report = self.run_fake(env)
+        self.assertEqual(report["status"], "ok", report)
+        reply = self.reply_for(env)
+        self.assertIsNone(signing.verify(reply, self.commander_trusts))
+
+    def test_unsigned_and_forged_tasks_refused(self):
+        for key, reason in ((None, "unsigned"), (self.mallory_key, "bad signature")):
+            with self.subTest(reason=reason):
+                env = self.send_signed(key)
+                report = self.run_fake(env)
+                self.assertEqual(report["status"], "refused")
+                self.assertIn(reason, self.reply_for(env)["body"])
+                self.assertFalse((self.repo / dispatch.WORKTREE_DIR / env["id"]).exists())
+
+    def test_no_senders_means_no_one(self):
+        self.cfg["dispatch"].pop("senders")
+        env = self.send_signed(self.commander_key)
+        self.assertEqual(self.run_fake(env)["status"], "refused")
+        self.assertIn("accepts dispatch tasks from no one", self.reply_for(env)["body"])
 
 
 class ExecutableTests(DispatchBase):

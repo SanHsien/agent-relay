@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import advisor, config, doorbell, envelope, gitsync, locks, poller
+from . import advisor, config, doorbell, envelope, gitsync, locks, poller, signing
 from . import context as handover
 from . import dispatch as dispatcher
 from .store import Store, StoreError
@@ -168,6 +168,12 @@ def cmd_send(args, cfg) -> int:
         refs=args.ref,
         dispatch=_dispatch_spec(args),
     )
+    key = signing.settings(cfg, config.home())[0]
+    if key:
+        env = signing.sign(env, key)
+    elif env.get("dispatch"):
+        print("warning: no signing key (run `relay keygen`); receivers that require signatures will refuse this task",
+              file=sys.stderr)
     path = store.deliver(env)
     try:
         _sync(args, cfg, f"relay: {env['from']} -> {env['to']} {env['id']}")
@@ -177,6 +183,37 @@ def cmd_send(args, cfg) -> int:
              f"queued {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
         return 3
     _out(args, {"id": env["id"], "path": str(path)}, f"sent {env['id']} -> {env['to']}")
+    return 0
+
+
+def cmd_keygen(args, cfg) -> int:
+    agent = _agent(args, cfg)
+    key = Path(args.key).expanduser() if args.key else signing.default_key(config.home(), agent)
+    try:
+        public = signing.keygen(key, agent)
+    except signing.SigningError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    if args.key:  # a non-default location has to be in the config to be used
+        path = config.home() / "config.json"
+        current = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        current.setdefault("signing", {})["key"] = str(key)
+        path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _out(args, {"key": str(key), "public": public},
+         f"key: {key}\npublic key (give it to each receiver: relay trust {agent} <this line>):\n{public}")
+    return 0
+
+
+def cmd_trust(args, cfg) -> int:
+    source = args.public_key
+    text = sys.stdin.read() if source == "-" else (
+        Path(source).read_text(encoding="utf-8") if Path(source).is_file() else source)
+    allowed = signing.settings(cfg, config.home())[1]
+    try:
+        signing.trust(allowed, args.agent, text.strip())
+    except signing.SigningError as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    _out(args, {"agent": args.agent, "allowed_signers": str(allowed)},
+         f"{args.agent} may now sign envelopes for this machine ({allowed})")
     return 0
 
 
@@ -353,6 +390,16 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("id")
         s.add_argument("--agent")
         s.set_defaults(func=func)
+
+    s = sub.add_parser("keygen", help="create this mailbox's envelope signing key (SPEC section 13)")
+    s.add_argument("--agent")
+    s.add_argument("--key", help="where to write it (default ~/.agent-relay/keys/<agent>_ed25519)")
+    s.set_defaults(func=cmd_keygen)
+
+    s = sub.add_parser("trust", help="allow a public key to sign as a mailbox on this machine")
+    s.add_argument("agent", help="the mailbox this key may speak for")
+    s.add_argument("public_key", help="a .pub file, the key line itself, or - for stdin")
+    s.set_defaults(func=cmd_trust)
 
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")

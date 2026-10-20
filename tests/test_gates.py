@@ -81,6 +81,7 @@ class DispatchGateTests(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "i"], check=True)
         self.cfg = {"store": str(d / "store"), "agent": "cc", "doorbells": [],
                     "dispatch": {"runtimes": ["claude"], "repo_roots": [str(d / "repos")], "context": False,
+                                 "senders": ["commander"], "require_signature": False,
                                  "verify": {"command": UNITTEST}}}
         self.store = Store(self.cfg["store"])
 
