@@ -361,3 +361,39 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
   收件端也執行 `keygen`，並讓寄件端 `trust` 它，回信就會帶簽章。
 - **回信也簽**：收件端有金鑰時，派工回信（含 `interrupted`）也會簽章，指揮者 `relay accept`（第 14 節）可以據此確認回信真的來自收件端。簽章失敗時照樣送出未簽的回信，並記入 log：回信一定要送到。
 - **已知限制**：私鑰沒有密碼，保護靠檔案權限（ssh-keygen 建立時只給目前使用者）。拿得到收件端使用者帳號的人本來就能直接執行程式，不在這個威脅模型內。
+
+## 14. 結果回傳與指揮者驗收合併（`push_branch`＋`relay accept`）
+
+```text
+收件端  dispatch ok、閘門過、relay commit ──▶ push relay/<id> 到 repo 的 origin（dispatch.push_branch）
+                                              回信 result.pushed = {remote, ref, commit}（有簽章）
+指揮者  relay accept <回信 id> --repo <自己的 clone> [--into <分支>]
+          ├─ 驗回信簽章、status ok、commit／base 是完整 sha、pushed 指向 relay/<id>
+          ├─ 工作目錄乾淨、目前分支就是 --into
+          ├─ fetch origin relay/<id>：FETCH_HEAD 必須等於回信的 commit（回信後又被推的分支不收）
+          ├─ base 必須是 commit 的祖先
+          ├─ 暫時 worktree 跑「指揮者自己的」accept.verify.command（不讀分支裡的設定）
+          └─ 通過才 merge --no-ff；任何一步失敗 = rejected。結果寫 audit，並回一封 note 給收件端
+```
+
+**收件端（推送）**：
+
+- `dispatch.push_branch: true` 才推送。條件是工人正常結束（status ok）、驗收閘門通過或沒設閘門，而且 relay 真的 commit 了。推送前會關掉 hooks。
+- 只推到收件端自己 clone 的 `origin`，信件指定不了遠端。`origin` 必須是主人自己的 GitHub repo（`https://github.com/SanHsien/`、`git@github.com:SanHsien/` 開頭），或是 `dispatch.push_remotes` 明列的遠端（本機路徑要完全相同）。其他遠端一律不推送，回信寫明原因。
+- 推送失敗不影響派工的 status；回信的「推送」段落與 `push_error` 會寫明原因，`result` 不會有 `pushed`。
+
+**指揮者（驗收）**：
+
+```json
+"accept": {
+  "verify": {"command": ["python", "-m", "unittest"], "timeout_minutes": 10},
+  "require_signature": true
+}
+```
+
+- 沒設 `accept.verify.command` 就拒絕合併，不合併沒驗證過的成果。`"loop-policy"` 讀的是指揮者 clone 主工作目錄的 `loop-policy.toml`，不是分支裡的那份。
+- 驗證在暫時 worktree 跑，log 存在 `~/.agent-relay/accepts/<回信 id>/verify-*.log`，連同 sha256 寫進 audit 和給收件端的 note。
+- 合併訊息是 `relay accept: relay/<id> (reply <回信 id>)`。合併衝突時會 `merge --abort` 並回報 rejected。
+- 指揮者 repo 自己的 hooks 照常執行：合併的是已在本機驗證過的程式，而且是在主人自己的 repo。
+- 結束後回信會被 ack，收件端收到 `accepted:`／`rejected:` 開頭的 note。
+- 已知限制：驗證指令會執行分支裡的程式碼（驗證本來就要執行它）；派工前就要只信任簽章過的收件端。

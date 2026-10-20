@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import advisor, config, doorbell, envelope, gitsync, locks, poller, signing
 from . import context as handover
+from . import accept as accepter
 from . import dispatch as dispatcher
 from .store import Store, StoreError
 
@@ -199,6 +200,20 @@ def cmd_send(args, cfg) -> int:
         return 3
     _out(args, {"id": env["id"], "path": str(path)}, f"sent {env['id']} -> {env['to']}")
     return 0
+
+
+def cmd_accept(args, cfg) -> int:
+    try:
+        report = accepter.accept(cfg, _agent(args, cfg), args.id, Path(args.repo), args.into, sync=not args.no_sync)
+    except accepter.AcceptError as exc:  # the reply itself could not be read: nothing was recorded
+        raise SystemExit(f"error: {exc}") from exc
+    lines = [f"{k}: {v}" for k, v in report.items() if k not in ("verify", "notes")]
+    if report.get("verify"):
+        lines.append(f"verify: {report['verify']['command']} -> exit {report['verify']['exit']} "
+                     f"(sha256 {report['verify']['sha256']})")
+    lines += [f"note: {n}" for n in report.get("notes", [])]
+    _out(args, report, chr(10).join(lines))
+    return 0 if report["status"] == "accepted" else 7
 
 
 def cmd_keygen(args, cfg) -> int:
@@ -406,6 +421,13 @@ def parser() -> argparse.ArgumentParser:
         s.add_argument("id")
         s.add_argument("--agent")
         s.set_defaults(func=func)
+
+    s = sub.add_parser("accept", help="fetch a worker's pushed branch, verify it here and merge (SPEC section 14)")
+    s.add_argument("id", help="the dispatch reply (kind=result) in your mailbox")
+    s.add_argument("--repo", required=True, help="your clone of the repo to merge into")
+    s.add_argument("--into", help="the branch to merge into (must be checked out; default: the current one)")
+    s.add_argument("--agent")
+    s.set_defaults(func=cmd_accept)
 
     s = sub.add_parser("keygen", help="create this mailbox's envelope signing key (SPEC section 13)")
     s.add_argument("--agent")

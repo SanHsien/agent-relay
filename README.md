@@ -62,6 +62,7 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 | Hermes 工人（寫入限於 worktree、回信附用量） | `send --run hermes` | 7 | [T-03](docs/evidence/2026-10-21-t03-hermes.md) | T-20261021-03 |
 | 寄件者驗證（信件 SSH 簽章、senders 預設拒絕） | `keygen`、`trust`、`dispatch.require_signature` | 13 | [T-07 簽章](docs/evidence/2026-10-21-t07-signing.md) | T-20261021-07 |
 | 指定施工起點、結構化回信 | `send --base`、回信 `result` 欄位 | 7 | [T-08](docs/evidence/2026-10-21-t08-base-result.md) | T-20261021-08 |
+| 結果分支回傳、指揮者驗收合併 | `dispatch.push_branch`、`accept` | 14 | [T-05](docs/evidence/2026-10-21-t05-accept.md) | T-20261021-05 |
 
 Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
 

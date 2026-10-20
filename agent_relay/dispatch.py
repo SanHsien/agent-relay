@@ -676,11 +676,47 @@ def read_state(env_id: str) -> dict | None:
         return None
 
 
+OWN_REMOTES = ("https://github.com/SanHsien/", "git@github.com:SanHsien/", "ssh://git@github.com/SanHsien/")
+
+
+def _same_path(a: str, b: str) -> bool:
+    try:
+        return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+    except (OSError, ValueError):
+        return False
+
+
+def push_allowed(url: str, policy: dict) -> bool:
+    """Only the owner's own GitHub repos, plus remotes this machine lists in dispatch.push_remotes.
+
+    A local path counts only when listed exactly: a task cannot point the push anywhere,
+    the remote is whatever `origin` of the receiver's own clone already is.
+    """
+    url = url.strip()
+    if any(url.startswith(prefix) for prefix in OWN_REMOTES):
+        return True
+    for allowed in policy.get("push_remotes") or []:
+        if isinstance(allowed, str) and (url == allowed or _same_path(url, allowed)):
+            return True
+    return False
+
+
+def push_branch(repo: Path, branch: str, commit: str, policy: dict) -> dict:
+    """Push relay/<id> to the repo's origin. Returns the `pushed` result field or raises DispatchError."""
+    url = _git(repo, "remote", "get-url", "origin").strip()
+    if not push_allowed(url, policy):
+        raise DispatchError(f"origin {url} is not one of the owner's repos or dispatch.push_remotes; not pushing")
+    ref = f"refs/heads/{branch}"
+    # Hooks off: the branch holds the worker's files, and pre-push hooks run from the repo's config.
+    _git(repo, "-c", "core.hooksPath=" + os.devnull, "push", "--quiet", "--no-verify", "origin", f"{commit}:{ref}")
+    return {"remote": "origin", "ref": ref, "commit": commit}
+
+
 def result_fields(report: dict) -> dict:
     """The machine-readable part of a dispatch reply (SPEC section 7): what `relay accept` reads."""
     fields = {"status": report["status"], "runtime": report.get("runtime"), "branch": report.get("branch"),
               "commit": report.get("commit_sha"), "base": report.get("base"), "gate": report.get("gate"),
-              "usage": report.get("usage")}
+              "usage": report.get("usage"), "pushed": report.get("pushed")}
     return {k: v for k, v in fields.items() if v is not None}
 
 
@@ -921,6 +957,14 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             body = body.replace(f"status: {status}", f"status: {gate.status}", 1)
         if gate:
             report["gate"] = {"status": gate.status, "logs": [{k: r[k] for k in ("phase", "exit", "sha256")} for r in gate.logs]}
+        if policy.get("push_branch") and report["status"] == "ok" and report.get("commit_sha"):
+            # Only a finished worker whose gates passed (or that had none) leaves this machine.
+            try:
+                report["pushed"] = push_branch(repo, branch, report["commit_sha"], policy)
+                body += f"\n## 推送\n已推送 `{branch}`（commit {report['commit_sha']}）到 origin。\n"
+            except DispatchError as exc:
+                report["push_error"] = str(exc)
+                body += f"\n## 推送\n沒有推送：{exc}\n"
     except Deferred as exc:
         report.update(status="deferred", error=str(exc))
         body = f"status: deferred\n原因: {exc}\n"
