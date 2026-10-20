@@ -722,6 +722,12 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             escalations.append(f"{attempts[-1]} → 閘門 {gate.status if gate else status}；升級到 {esc['runtime']}"
                                f"{'/' + esc['model'] if esc.get('model') else ''}")
             prompt = build_escalation_prompt(env, worktree, branch, spec, status, gate, run_dir, base)
+            for gate_log in run_dir.glob("verify-*.log"):  # keep round 1's evidence; round 2 rewrites these
+                os.replace(gate_log, gate_log.with_name(gate_log.stem + ".round1.log"))
+            if gate is not None:
+                for run_log in gate.logs:
+                    run_log["log"] = str(Path(run_log["log"]).with_name(Path(run_log["log"]).stem + ".round1.log"))
+                escalations[-1] += "；第 1 輪閘門 log：" + "、".join(Path(r["log"]).name for r in gate.logs)
             spec = {k: v for k, v in {**spec, **esc}.items() if v is not None}
             fallbacks, limited = [], set()
         if plan:

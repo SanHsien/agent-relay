@@ -69,6 +69,10 @@ class EscalationTests(unittest.TestCase):
         self.assertTrue(report["commit"].startswith("committed:"))
         self.assertIn("## 回流升級", body)
         self.assertIn("verification-failed", body)
+        runs = Path(os.environ["AGENT_RELAY_HOME"]) / "runs"
+        names = sorted(p.name for p in runs.rglob("verify-*.log"))
+        self.assertEqual(names, ["verify-green.log", "verify-green.round1.log"])  # round 1 evidence kept
+        self.assertIn("verify-green.round1.log", body)
         escalation_prompt = calls[1]["prompt"]
         for needed in ("升級診斷工人", "根因", "驗收失敗的真實證據", "exit 1", "AssertionError", "第一個工人改了什麼", "calc.py"):
             self.assertIn(needed, escalation_prompt)
