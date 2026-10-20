@@ -102,12 +102,10 @@ class GcTests(unittest.TestCase):
         later = time.time() + 15 * 86400
         actions = gc.apply(gc.plan(self.cfg, "claude-code", now=later))
         kept = {a["kind"] for a in actions if a.get("kept")}
-        self.assertEqual(kept, {"worktree", "branch"})
+        self.assertEqual(kept, {"worktree", "branch", "run-dir"})  # the record stays so a later gc finds it
         self.assertFalse(any(a.get("error") for a in actions))
         self.assertTrue(Path(report["worktree"]).is_dir())
         self.assertIn("kept:", gc.render(actions, applied=True))
-        # The first pass removed the run record; restore it so the forced pass sees the run again.
-        dispatch.write_state(env["id"], phase="replied", status="ok", finished=time.time() - 30 * 86400)
         forced = gc.apply(gc.plan(self.cfg, "claude-code", now=later, force=True))
         self.assertTrue(all(a["done"] for a in forced if a["kind"] in ("worktree", "branch")), forced)
         self.assertFalse(Path(report["worktree"]).exists())

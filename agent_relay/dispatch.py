@@ -753,8 +753,10 @@ def _owner_gone(owner: dict | None) -> bool:
     if not owner or not pid_alive(owner.get("pid")):
         return True
     state = read_state(str(owner.get("env", ""))) or {}
-    if state.get("phase") == "replied":
-        return True  # that run finished: a live pid now is a reused one
+    finished = state.get("finished")
+    if state.get("phase") == "replied" and isinstance(finished, (int, float)) \
+            and finished >= float(owner.get("at") or 0):
+        return True  # that run answered after this record was made: a live pid now is a reused one
     until = owner.get("until")
     return isinstance(until, (int, float)) and time.time() > until
 
@@ -772,7 +774,7 @@ def take_task(env_id: str, timeout_s: int) -> Path:
                 and pid_alive(lease.get("pid")):
             raise DispatchError(f"{env_id} is already being run here (pid {lease.get('pid')})")
         path.write_text(json.dumps({"pid": os.getpid(), "env": env_id,
-                                    "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
+                                    "at": time.time(), "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
                         encoding="utf-8")
     return path
 
@@ -813,7 +815,7 @@ def claim_run(env_id: str, limit: int | None, daily: int | None, timeout_s: int)
                 return False
             slot = folder / f"slot-{env_id}"
             slot.write_text(json.dumps({"pid": os.getpid(), "env": env_id,
-                                        "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
+                                        "at": time.time(), "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
                             encoding="utf-8")
         count_run(env_id)
         return slot

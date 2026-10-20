@@ -157,6 +157,11 @@ def apply(actions: list[dict]) -> list[dict]:
                 proc = _git(Path(action["repo"]), "push", "--quiet", "--no-verify", "origin", "--delete", action["ref"])
                 if proc.returncode != 0:
                     raise GcError((proc.stderr or proc.stdout).strip())
+            elif kind == "run-dir" and any(a["id"] == action["id"] and (a.get("kept") or a.get("error"))
+                                           for a in actions if a is not action):
+                # Something of this run was kept or failed: its record is how a later gc finds it again.
+                action.update(done=False, kept="run record kept: its worktree, branch or remote branch was kept")
+                continue
             elif kind in ("run-dir", "accept-logs"):
                 shutil.rmtree(action["path"])
             elif kind == "done-mail":

@@ -394,7 +394,7 @@ class LimitTests(DispatchBase):
         (folder / "slot-crashed").write_text(json.dumps({"pid": dead.pid, "env": "crashed"}), encoding="utf-8")
         # A live pid whose run already replied is a reused pid: also freed.
         (folder / "slot-done").write_text(json.dumps({"pid": os.getpid(), "env": "done"}), encoding="utf-8")
-        dispatch.write_state("done", phase="replied", status="ok")
+        dispatch.write_state("done", phase="replied", status="ok", finished=time.time())
         self.assertTrue(dispatch.claim_run("next", 1, None, 60))
         self.assertEqual(sorted(p.name for p in folder.iterdir()), ["slot-next"])
 
