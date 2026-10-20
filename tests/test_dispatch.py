@@ -373,6 +373,86 @@ class BaseAndResultTests(DispatchBase):
             envelope.build(sender="a", to="b", subject="x", body="", kind="result", result={"branch": "x"})
 
 
+class LimitTests(DispatchBase):
+    """T-20261021-09: max_concurrent, daily_limit and one worker per task."""
+
+    def test_slots(self):
+        first = dispatch.try_slot(1, "a")
+        self.assertIsNotNone(first)
+        self.assertIsNone(dispatch.try_slot(1, "b"))
+        with self.assertRaises(dispatch.Deferred):
+            dispatch.acquire_slot(1, "b", wait_s=0, timeout_s=60)
+        dispatch.release_slot(first)
+        self.assertIsNotNone(dispatch.try_slot(1, "b"))
+
+    def test_slot_of_a_dead_owner_is_freed(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        folder = dispatch._slots_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "slot-0").write_text(json.dumps({"pid": dead.pid, "env": "crashed"}), encoding="utf-8")
+        self.assertEqual(dispatch.try_slot(1, "next"), folder / "slot-0")
+
+    def test_at_most_max_concurrent_workers(self):
+        import threading
+
+        self.cfg["dispatch"]["max_concurrent"] = 2
+        logs = self.dir / "overlap"
+        logs.mkdir()
+        # Each worker writes its own start/end times around a short sleep (appends to one shared
+        # file are not atomic on Windows); a separate repo each, so git never contends.
+        code = ("import os, time, pathlib;"
+                "start = time.time(); time.sleep(1.5);"
+                f"(pathlib.Path(r'{logs}') / str(os.getpid())).write_text(f'{{start}} {{time.time()}}');"
+                "pathlib.Path('proof.txt').write_text('x')")
+        envs = []
+        for n in range(5):
+            repo = self.dir / "repos" / f"r{n}"
+            repo.mkdir(parents=True)
+            git("init", "--quiet", cwd=repo)
+            (repo / "README.md").write_text("r\n", encoding="utf-8")
+            git("add", ".", cwd=repo)
+            git("commit", "--quiet", "-m", "init", cwd=repo)
+            envs.append(self.send_task(repo=str(repo)))
+        reports = []
+        builder, resolver = fake(code, stdin=False)
+        with builder, resolver, mock.patch.object(dispatch, "SLOT_POLL_S", 0.2):
+            threads = [threading.Thread(target=lambda e=e: reports.append(
+                dispatch.dispatch(e["id"], "claude-code", self.cfg, sync=False))) for e in envs]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(sorted(r["status"] for r in reports), ["ok"] * 5)
+        spans = [tuple(map(float, f.read_text().split())) for f in logs.iterdir()]
+        self.assertEqual(len(spans), 5)
+        events = sorted([(s, "start") for s, _ in spans] + [(e, "end") for _, e in spans])
+        running = peak = 0
+        for _, kind in events:
+            running += 1 if kind == "start" else -1
+            peak = max(peak, running)
+        self.assertEqual(peak, 2)
+        self.assertEqual(list(dispatch._slots_dir().glob("slot-*")), [])
+
+    def test_daily_limit(self):
+        self.cfg["dispatch"]["daily_limit"] = 1
+        self.assertEqual(self.run_fake(self.send_task())["status"], "ok")
+        env = self.send_task()
+        self.assertEqual(self.run_fake(env)["status"], "deferred")
+        self.assertIn("daily_limit", self.reply_for(env)["body"])
+
+    def test_one_worker_per_task(self):
+        env = self.send_task()
+        alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(alive.kill)
+        dispatch.write_state(env["id"], phase="running", pid=alive.pid, started=time.time(),
+                             deadline=time.time() + 60)
+        for force in (False, True):
+            with self.subTest(force=force), self.assertRaisesRegex(dispatch.DispatchError, "already being run"):
+                self.run_fake(env, force=force)
+        self.assertEqual(self.replies_for(env), [])
+
+
 class ExecutableTests(DispatchBase):
     def test_batch_shim_refused(self):
         shim = self.dir / "claude.cmd"

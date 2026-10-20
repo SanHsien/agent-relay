@@ -404,3 +404,14 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 - 執行中遇到 git 逾時或 I/O 錯誤，記為 rejected 並附原因；記錄或通知失敗時，不會掩蓋已完成的合併（寫在 notes）。
 - 結束後回信會被 ack，收件端收到 `accepted:`／`rejected:` 開頭的 note。
 - 已知限制：驗證指令會執行分支裡的程式碼（驗證本來就要執行它）；派工前就要只信任簽章過的收件端。
+
+## 15. 收件端上限與防重跑
+
+```json
+"dispatch": {"max_concurrent": 2, "queue_wait_minutes": 240, "daily_limit": 20}
+```
+
+- **並發**：`max_concurrent` 設定這台機器同時最多跑幾個工人。每個名額是 `runs/.slots/slot-<k>` 的 O_EXCL 檔，內容記錄 pid。擁有者行程不在了，名額就會被收回。沒有空位時，派工會在自己的分頁裡排隊：lease 的 phase 是 `queued`，每 15 秒檢查一次，超過 `queue_wait_minutes`（預設 240）就回 `deferred`。名額在派工結束時釋放，不論成功或失敗。
+- **每日上限**：`daily_limit` 計算的是今天（本機日期）真正拿到工人的派工張數，紀錄在 `runs/.ledger/<日期>.txt`。達到上限就回 `deferred`，不會開工人。上限檢查放在寄件者與簽章驗證之後，所以冒名的信不會占掉額度。
+- **一張工單只跑一個工人**：本機 lease 的 phase 若是 `running`／`queued`，而且那個 pid 還活著，第二次觸發一律拒絕，`--force` 也一樣。被拒的那次不回信、不 ack，原本那次照常回信。
+- 費用：回信附上每次嘗試的用量。目前只有 hermes 會提供用量；claude／codex 的花費看各自的額度工具（SPEC §10）。
