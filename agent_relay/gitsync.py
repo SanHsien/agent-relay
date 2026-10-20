@@ -16,6 +16,8 @@ import threading
 import time
 from pathlib import Path
 
+from .procs import pid_alive
+
 PUSH_RETRIES = 3
 TIMEOUT = 120
 SHARED_DIRS = ("mailboxes", "claims", "audit", "hosts")  # everything relay shares between machines
@@ -72,9 +74,11 @@ def _acquire(lock: Path) -> str:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(token)
             return token
-        except FileExistsError:
+        except (FileExistsError, PermissionError):  # Windows: PermissionError while the old file is being deleted
             try:
-                if time.time() - lock.stat().st_mtime > LOCK_STALE_S:  # its owner crashed
+                owner = lock.read_text(encoding="utf-8").split("-")[0]
+                gone = owner.isdigit() and not pid_alive(int(owner))
+                if gone or time.time() - lock.stat().st_mtime > LOCK_STALE_S:  # its owner crashed
                     os.replace(lock, lock.with_name(f"{lock.name}.stale-{token}"))
                     os.unlink(lock.with_name(f"{lock.name}.stale-{token}"))
                     continue

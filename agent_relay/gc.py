@@ -65,36 +65,56 @@ def _repos(cfg: dict, extra: list[str]) -> list[Path]:
 
 
 def plan(cfg: dict, agent: str, days: float = DEFAULT_DAYS, repos: list[str] | None = None,
-         now: float | None = None) -> list[dict]:
-    """What gc would do, as a list of actions."""
+         now: float | None = None, force: bool = False) -> list[dict]:
+    """What gc would do, as a list of actions.
+
+    Work that left this machine and was answered by the commander (pushed, then
+    accepted or rejected) is removed outright. Anything else is only removed the
+    careful way: a worktree with uncommitted files and a branch not merged anywhere
+    are kept, unless force is set.
+    """
     now = now or time.time()
+    if not (isinstance(days, (int, float)) and days > 0):
+        raise GcError("--older-than must be a positive number of days")
     max_age_h = (cfg.get("dispatch") or {}).get("max_age_hours", dispatch.DEFAULT_MAX_AGE_H)
-    if isinstance(max_age_h, (int, float)) and days * 24 < max_age_h:
-        # The local run record is what refuses a replayed signed task (SPEC 13); keep it at least as
-        # long as a task is accepted at all.
+    if not (isinstance(max_age_h, (int, float)) and not isinstance(max_age_h, bool) and max_age_h > 0):
+        # Without an age limit an old signed task is accepted forever, and only the run record
+        # stops a replay (SPEC 13): never delete it then.
+        raise GcError("dispatch.max_age_hours is not a positive number; set it before running gc")
+    if days * 24 < max_age_h:
         raise GcError(f"--older-than {days} days is shorter than dispatch.max_age_hours ({max_age_h} h)")
     cutoff = now - days * 86400
     finished = _finished_runs(cutoff)
     answered = _answered(cfg, agent)
+
+    def settled(env_id: str) -> bool:
+        state = finished[env_id]
+        return bool(state.get("pushed_ref")) and state.get("reply_id") in answered
+
     actions: list[dict] = []
     for repo in _repos(cfg, repos or []):
         for wt in sorted((repo / dispatch.WORKTREE_DIR).glob("*")):
             if wt.name in finished:
-                actions.append({"kind": "worktree", "repo": str(repo), "path": str(wt), "id": wt.name})
+                actions.append({"kind": "worktree", "repo": str(repo), "path": str(wt), "id": wt.name,
+                                "force": force or settled(wt.name)})
         branches = _git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/relay/").stdout.split()
         for branch in branches:
             env_id = branch[len("relay/"):]
             if env_id in finished:
-                actions.append({"kind": "branch", "repo": str(repo), "branch": branch, "id": env_id})
-                state = finished[env_id]
-                if state.get("pushed_ref") == f"refs/heads/{branch}" and state.get("reply_id") in answered:
-                    actions.append({"kind": "remote-branch", "repo": str(repo), "ref": state["pushed_ref"], "id": env_id})
-    for env_id in sorted(finished):
+                # A pushed branch's commits live on origin too: the local copy can go.
+                actions.append({"kind": "branch", "repo": str(repo), "branch": branch, "id": env_id,
+                                "force": force or bool(finished[env_id].get("pushed_ref"))})
+    for env_id, state in sorted(finished.items()):
+        # Not tied to the local branch: that may be gone already while origin still has the push.
+        if settled(env_id) and state.get("repo") and Path(state["repo"]).is_dir():
+            actions.append({"kind": "remote-branch", "repo": state["repo"], "ref": state["pushed_ref"], "id": env_id})
         actions.append({"kind": "run-dir", "path": str(config.home() / "runs" / env_id), "id": env_id})
+    # An accepted/rejected note is what proves a pushed branch may go: keep it while its run is kept.
+    kept_replies = {s.get("reply_id") for s in _all_states().values()} - {s.get("reply_id") for s in finished.values()}
     store = Store(cfg["store"])
     for _, env in store.list(agent, ("done",)):
         created = datetime.fromisoformat(str(env["created_at"]).replace("Z", "+00:00")).timestamp()
-        if created < cutoff:
+        if created < cutoff and not (env["kind"] == "note" and env.get("reply_to") in kept_replies):
             actions.append({"kind": "done-mail", "path": str(store.box(agent, "done") / f"{env['id']}.json"),
                             "id": env["id"]})
     accepts = config.home() / "accepts"
@@ -104,19 +124,35 @@ def plan(cfg: dict, agent: str, days: float = DEFAULT_DAYS, repos: list[str] | N
     return actions
 
 
+def _all_states() -> dict[str, dict]:
+    runs = config.home() / "runs"
+    out = {}
+    for state_file in runs.glob("*/state.json") if runs.is_dir() else []:
+        try:
+            out[state_file.parent.name] = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
 def apply(actions: list[dict]) -> list[dict]:
-    """Carry out the actions; each one records its own outcome."""
+    """Carry out the actions; each one records its own outcome ('done', 'kept' or 'error')."""
     for action in actions:
         kind = action["kind"]
         try:
             if kind == "worktree":
-                proc = _git(Path(action["repo"]), "worktree", "remove", "--force", action["path"])
+                # Without force git refuses a worktree with uncommitted or untracked files: keep it.
+                args = ["worktree", "remove", *(["--force"] if action.get("force") else []), action["path"]]
+                proc = _git(Path(action["repo"]), *args)
                 if proc.returncode != 0:
-                    raise GcError((proc.stderr or proc.stdout).strip())
+                    action.update(done=False, kept=(proc.stderr or proc.stdout).strip()[:200])
+                    continue
             elif kind == "branch":
-                proc = _git(Path(action["repo"]), "branch", "-D", action["branch"])
+                # -d keeps a branch whose commits exist nowhere else (not pushed, not merged).
+                proc = _git(Path(action["repo"]), "branch", "-D" if action.get("force") else "-d", action["branch"])
                 if proc.returncode != 0:
-                    raise GcError((proc.stderr or proc.stdout).strip())
+                    action.update(done=False, kept=(proc.stderr or proc.stdout).strip()[:200])
+                    continue
             elif kind == "remote-branch":
                 proc = _git(Path(action["repo"]), "push", "--quiet", "--no-verify", "origin", "--delete", action["ref"])
                 if proc.returncode != 0:
@@ -139,7 +175,8 @@ def render(actions: list[dict], applied: bool) -> str:
     lines = []
     for a in actions:
         target = a.get("branch") or a.get("ref") or a.get("path")
-        status = "" if not applied else (" ok" if a.get("done") else f" FAILED: {a.get('error')}")
+        status = "" if not applied else (" ok" if a.get("done") else
+                                          f" kept: {a['kept']}" if a.get("kept") else f" FAILED: {a.get('error')}")
         lines.append(f"{verb}remove {a['kind']}: {target}{status}")
     counts: dict[str, int] = {}
     for a in actions:

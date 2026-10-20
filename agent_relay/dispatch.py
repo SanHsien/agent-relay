@@ -38,6 +38,7 @@ from pathlib import Path
 
 from . import advisor, config, context, doorbell, envelope, gates, gitsync, locks, signing
 from .context import redact
+from .procs import pid_alive
 from .store import Store
 
 RUNTIMES = ("claude", "codex", "agy", "hermes")
@@ -691,46 +692,139 @@ def read_state(env_id: str) -> dict | None:
 
 SLOT_POLL_S = 15
 DEFAULT_QUEUE_WAIT_MIN = 240
+LIMITS_LOCK_STALE_S = 60  # the lock is held for milliseconds; older than this, its holder crashed
+SLOT_SLACK_S = 4 * 3600  # a slot outlives its worker's timeout plus gates by at most this much
+
+
+def _runs_dir() -> Path:
+    return config.home() / "runs"
 
 
 def _slots_dir() -> Path:
-    return config.home() / "runs" / ".slots"
+    return _runs_dir() / ".slots"
 
 
-def try_slot(limit: int, env_id: str) -> Path | None:
-    """Take one of `limit` worker slots (O_EXCL files). A slot whose owner process is gone is freed."""
-    folder = _slots_dir()
-    folder.mkdir(parents=True, exist_ok=True)
-    for k in range(limit):
-        path = folder / f"slot-{k}"
-        for _ in range(2):
+class _LimitsLock:
+    """A short O_EXCL lock around every check-then-write on this machine's limits.
+
+    Slots, the daily ledger and task ownership are all read and written under it, so
+    two dispatch tabs can never both see a free slot, an unused daily quota or an
+    unowned task. Nothing slow happens while it is held.
+    """
+
+    def __enter__(self):
+        self.path = _runs_dir() / ".limits.lock"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        give_up = time.time() + 120
+        while True:
             try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(str(os.getpid()))
+                return self
+            except (FileExistsError, PermissionError):  # Windows: PermissionError while the old file is being deleted
                 try:
-                    owner = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    owner = {}
-                if pid_alive(owner.get("pid")):
-                    break  # really busy: try the next slot
-                try:
-                    os.replace(path, path.with_name(f".stale-{k}-{os.getpid()}"))  # crashed owner
-                    os.unlink(path.with_name(f".stale-{k}-{os.getpid()}"))
+                    if time.time() - self.path.stat().st_mtime > LIMITS_LOCK_STALE_S:
+                        self.path.unlink()  # its holder crashed inside a millisecond-long section
+                        continue
                 except OSError:
-                    pass
-                continue
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"pid": os.getpid(), "env": env_id, "at": time.time()}))
-            return path
-    return None
+                    continue
+                if time.time() > give_up:
+                    raise DispatchError(f"{self.path} is held for more than 120 s")
+                time.sleep(0.02)
+
+    def __exit__(self, *exc):
+        try:
+            self.path.unlink()
+        except OSError:
+            pass
 
 
-def acquire_slot(limit: int, env_id: str, wait_s: int, timeout_s: int) -> Path:
-    """Wait (lease phase 'queued') until fewer than `limit` workers run on this machine."""
+def _read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _owner_gone(owner: dict | None) -> bool:
+    """Is the process that wrote this slot or ownership record gone (or its pid reused)?"""
+    if not owner or not pid_alive(owner.get("pid")):
+        return True
+    state = read_state(str(owner.get("env", ""))) or {}
+    if state.get("phase") == "replied":
+        return True  # that run finished: a live pid now is a reused one
+    until = owner.get("until")
+    return isinstance(until, (int, float)) and time.time() > until
+
+
+def take_task(env_id: str, timeout_s: int) -> Path:
+    """Own this task on this machine: a second trigger (doorbell, manual, --force) is refused."""
+    path = _runs_dir() / env_id / ".owner"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LimitsLock():
+        owner = _read_json(path) if path.exists() else None
+        if owner is not None and not _owner_gone(owner):
+            raise DispatchError(f"{env_id} is already being run here (pid {owner.get('pid')})")
+        lease = read_state(env_id) or {}  # a run started by an older relay has a lease but no .owner
+        if lease.get("phase") in ("running", "queued") and lease.get("pid") != os.getpid() \
+                and pid_alive(lease.get("pid")):
+            raise DispatchError(f"{env_id} is already being run here (pid {lease.get('pid')})")
+        path.write_text(json.dumps({"pid": os.getpid(), "env": env_id,
+                                    "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
+                        encoding="utf-8")
+    return path
+
+
+def release_owned(path: Path | None) -> None:
+    """Remove a slot or ownership record if this process wrote it."""
+    if path is None:
+        return
+    with _LimitsLock():
+        owner = _read_json(path)
+        if owner and owner.get("pid") == os.getpid():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def claim_run(env_id: str, limit: int | None, daily: int | None, timeout_s: int) -> Path | None | bool:
+    """Under the limits lock: check the daily quota and a free slot, then take both at once.
+
+    Returns the slot file, None when no slot is needed (no max_concurrent), or False
+    when every slot is busy. Raises Deferred when today's quota is used up.
+    """
+    with _LimitsLock():
+        if daily and len(runs_today() - {env_id}) >= daily:
+            raise Deferred(f"這台機器今天已派 {daily} 張工單（dispatch.daily_limit），明天再寄或請收件端調高上限。")
+        slot = None
+        if limit:
+            folder = _slots_dir()
+            folder.mkdir(parents=True, exist_ok=True)
+            live = 0
+            for path in folder.glob("slot-*"):
+                if _owner_gone(_read_json(path)):
+                    path.unlink(missing_ok=True)
+                else:
+                    live += 1
+            if live >= limit:
+                return False
+            slot = folder / f"slot-{env_id}"
+            slot.write_text(json.dumps({"pid": os.getpid(), "env": env_id,
+                                        "until": time.time() + timeout_s + LEASE_GRACE_S + SLOT_SLACK_S}),
+                            encoding="utf-8")
+        count_run(env_id)
+        return slot
+
+
+def acquire_slot(env_id: str, limit: int | None, daily: int | None, wait_s: int, timeout_s: int) -> Path | None:
+    """Wait (lease phase 'queued') until a slot is free; the daily quota is checked again on every try."""
     give_up = time.time() + wait_s
     while True:
-        slot = try_slot(limit, env_id)
-        if slot is not None:
+        slot = claim_run(env_id, limit, daily, timeout_s)
+        if slot is not False:
             return slot
         if time.time() >= give_up:
             raise Deferred(f"這台機器同時最多 {limit} 個工人（dispatch.max_concurrent），等了 {wait_s // 60} 分鐘仍沒有空位。")
@@ -739,19 +833,8 @@ def acquire_slot(limit: int, env_id: str, wait_s: int, timeout_s: int) -> Path:
         time.sleep(SLOT_POLL_S)
 
 
-def release_slot(slot: Path | None) -> None:
-    if slot is None:
-        return
-    try:
-        owner = json.loads(slot.read_text(encoding="utf-8"))
-        if owner.get("pid") == os.getpid():
-            slot.unlink()
-    except (OSError, ValueError):
-        pass
-
-
 def _ledger(day: str) -> Path:
-    return config.home() / "runs" / ".ledger" / f"{day}.txt"
+    return _runs_dir() / ".ledger" / f"{day}.txt"
 
 
 def runs_today(day: str | None = None) -> set[str]:
@@ -824,7 +907,7 @@ def result_fields(report: dict) -> dict:
 
 
 def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dict | None = None,
-           result: dict | None = None) -> dict:
+           result: dict | None = None, repo: str | None = None) -> dict:
     reply = envelope.build(sender=agent, to=env["from"], subject=f"{status}: {env['subject']}"[:200],
                            body=redact(body), kind="result", reply_to=env["id"], thread=env.get("thread"),
                            priority="normal" if status == "ok" else "high",
@@ -839,7 +922,7 @@ def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dic
     store.ack(agent, env["id"])
     pushed = (result or {}).get("pushed") or {}
     write_state(env["id"], phase="replied", status=status, reply_id=reply["id"], finished=time.time(),
-                pushed_ref=pushed.get("ref"))  # relay gc deletes only branches this machine pushed
+                pushed_ref=pushed.get("ref"), repo=repo)  # relay gc deletes only branches this machine pushed
     return reply
 
 
@@ -874,9 +957,8 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
     lease = read_state(env_id) or {}
     if lease.get("phase") == "replied" and not force:
         raise DispatchError(f"{env_id} was already run and answered on this machine; pass --force to run it again")
-    if lease.get("phase") in ("running", "queued") and lease.get("pid") != os.getpid() and pid_alive(lease.get("pid")):
-        # A second doorbell, a manual run, --force: never two workers on one task.
-        raise DispatchError(f"{env_id} is already being run here (pid {lease.get('pid')})")
+    # A second doorbell, a manual run, --force: never two workers on one task.
+    owned = take_task(env_id, MAX_TIMEOUT_MIN * 60)
     env = store.read(agent, env_id)
     run_dir = config.home() / "runs" / env_id
     report: dict = {"id": env_id, "status": "refused"}
@@ -892,6 +974,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
         decision = None
         repo = policy_check(env, spec, cfg.get("dispatch") or {}, signing.settings(cfg, config.home())[1])  # first: who may ask, which repo
+        report["repo"] = str(repo)
         if spec["runtime"] == "auto":
             # Pick with this machine's quotas: it is this machine's accounts that will pay.
             decision = advisor.decide(env["subject"], env["body"], spec.get("paths"), spec.get("mode", "build"),
@@ -905,14 +988,9 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             if decision.effort:
                 spec["effort"] = decision.effort
         policy = cfg.get("dispatch") or {}
-        daily = _positive_int(policy.get("daily_limit"))
-        if daily and len(runs_today() - {env_id}) >= daily:
-            raise Deferred(f"這台機器今天已派 {daily} 張工單（dispatch.daily_limit），明天再寄或請收件端調高上限。")
-        concurrent = _positive_int(policy.get("max_concurrent"))
-        if concurrent:
-            wait_min = _positive_int(policy.get("queue_wait_minutes")) or DEFAULT_QUEUE_WAIT_MIN
-            slot = acquire_slot(concurrent, env_id, wait_min * 60, timeout_s)
-        count_run(env_id)
+        wait_min = _positive_int(policy.get("queue_wait_minutes")) or DEFAULT_QUEUE_WAIT_MIN
+        slot = acquire_slot(env_id, _positive_int(policy.get("max_concurrent")),
+                            _positive_int(policy.get("daily_limit")), wait_min * 60, timeout_s)
         plan = spec.get("mode", "build") == "plan"
         holder = f"relay:{env_id}"
         if spec.get("paths") and not plan:
@@ -1100,39 +1178,20 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         report.update(status="error", error=f"{type(exc).__name__}: {exc}")
         body = f"status: error\n原因: {type(exc).__name__}: {exc}\n"
     finally:
-        release_slot(slot)
+        release_owned(slot)
         if claim:
             try:
                 locks.release(Path(cfg["store"]), claim, changed=changed, env=env_id, status=report["status"])
             except OSError as exc:
                 doorbell._log(f"dispatch {env_id}: release failed: {exc}")
-    report["reply_id"] = _reply(store, agent, env, report["status"], body, cfg, result_fields(report))["id"]
+    try:
+        report["reply_id"] = _reply(store, agent, env, report["status"], body, cfg, result_fields(report),
+                                    repo=report.get("repo"))["id"]
+    finally:
+        release_owned(owned)
     if sync:
         _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")
     return report
-
-
-def pid_alive(pid) -> bool:
-    """Is that dispatch process still running? Never signals it (os.kill on Windows would end it)."""
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return False
-        try:
-            code = ctypes.c_ulong()
-            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def _never_started(env: dict, cfg: dict, rung: set[str], now: float) -> bool:
@@ -1162,7 +1221,8 @@ def reap_interrupted(agent: str, cfg: dict, now: float | None = None, rung: list
         try:
             if state == "cur":
                 lease = read_state(env["id"])
-                if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline")):
+                # queued counts too: a tab that died while waiting for a slot never answers either.
+                if not lease or lease.get("phase") not in ("running", "queued") or now < float(lease.get("deadline")):
                     continue
                 # The lease is rewritten before every attempt and before the gates, so a run
                 # that is really alive is never far past it. Well past it, a "live" pid is a

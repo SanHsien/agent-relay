@@ -377,21 +377,55 @@ class LimitTests(DispatchBase):
     """T-20261021-09: max_concurrent, daily_limit and one worker per task."""
 
     def test_slots(self):
-        first = dispatch.try_slot(1, "a")
-        self.assertIsNotNone(first)
-        self.assertIsNone(dispatch.try_slot(1, "b"))
+        first = dispatch.claim_run("a", 1, None, 60)
+        self.assertTrue(first)
+        self.assertIs(dispatch.claim_run("b", 1, None, 60), False)
         with self.assertRaises(dispatch.Deferred):
-            dispatch.acquire_slot(1, "b", wait_s=0, timeout_s=60)
-        dispatch.release_slot(first)
-        self.assertIsNotNone(dispatch.try_slot(1, "b"))
+            dispatch.acquire_slot("b", 1, None, wait_s=0, timeout_s=60)
+        dispatch.release_owned(first)
+        self.assertTrue(dispatch.claim_run("b", 1, None, 60))
+        self.assertIsNone(dispatch.claim_run("c", None, None, 60))  # no max_concurrent: no slot needed
 
-    def test_slot_of_a_dead_owner_is_freed(self):
+    def test_slot_of_a_gone_owner_is_freed(self):
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         folder = dispatch._slots_dir()
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "slot-0").write_text(json.dumps({"pid": dead.pid, "env": "crashed"}), encoding="utf-8")
-        self.assertEqual(dispatch.try_slot(1, "next"), folder / "slot-0")
+        (folder / "slot-crashed").write_text(json.dumps({"pid": dead.pid, "env": "crashed"}), encoding="utf-8")
+        # A live pid whose run already replied is a reused pid: also freed.
+        (folder / "slot-done").write_text(json.dumps({"pid": os.getpid(), "env": "done"}), encoding="utf-8")
+        dispatch.write_state("done", phase="replied", status="ok")
+        self.assertTrue(dispatch.claim_run("next", 1, None, 60))
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["slot-next"])
+
+    def test_daily_limit_holds_when_tasks_start_together(self):
+        import threading
+
+        results = []
+
+        def claim(n):
+            try:
+                results.append(dispatch.claim_run(f"t{n}", None, 2, 60))
+            except dispatch.Deferred:
+                results.append("deferred")
+
+        threads = [threading.Thread(target=claim, args=(n,)) for n in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results.count("deferred"), 4)
+        self.assertEqual(len(dispatch.runs_today()), 2)
+
+    def test_queued_run_that_died_is_reaped(self):
+        env = self.send_task()
+        self.store.read("claude-code", env["id"])  # in cur/, as a queued dispatch leaves it
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        dispatch.write_state(env["id"], phase="queued", pid=dead.pid, started=time.time() - 120,
+                             deadline=time.time() - 60)
+        self.assertEqual(dispatch.reap_interrupted("claude-code", self.cfg), [env["id"]])
+        self.assertIn("interrupted", self.reply_for(env)["subject"])
 
     def test_at_most_max_concurrent_workers(self):
         import threading
@@ -417,12 +451,20 @@ class LimitTests(DispatchBase):
         reports = []
         builder, resolver = fake(code, stdin=False)
         with builder, resolver, mock.patch.object(dispatch, "SLOT_POLL_S", 0.2):
-            threads = [threading.Thread(target=lambda e=e: reports.append(
-                dispatch.dispatch(e["id"], "claude-code", self.cfg, sync=False))) for e in envs]
+            errors = []
+
+            def run(e):
+                try:
+                    reports.append(dispatch.dispatch(e["id"], "claude-code", self.cfg, sync=False))
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    errors.append(repr(exc))
+
+            threads = [threading.Thread(target=run, args=(e,)) for e in envs]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+        self.assertEqual(errors, [])
         self.assertEqual(sorted(r["status"] for r in reports), ["ok"] * 5)
         spans = [tuple(map(float, f.read_text().split())) for f in logs.iterdir()]
         self.assertEqual(len(spans), 5)

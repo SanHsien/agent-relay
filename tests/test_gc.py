@@ -95,9 +95,29 @@ class GcTests(unittest.TestCase):
         self.assertFalse((Path(os.environ["AGENT_RELAY_HOME"]) / "runs" / answered_env["id"]).exists())
         self.assertEqual(self.store.list("claude-code", ("done",)), [])
 
+    def test_work_that_exists_nowhere_else_is_kept_unless_forced(self):
+        self.cfg["dispatch"]["push_branch"] = False
+        env, report = self.run_task()
+        (Path(report["worktree"]) / "scratch.txt").write_text("uncommitted", encoding="utf-8")
+        later = time.time() + 15 * 86400
+        actions = gc.apply(gc.plan(self.cfg, "claude-code", now=later))
+        kept = {a["kind"] for a in actions if a.get("kept")}
+        self.assertEqual(kept, {"worktree", "branch"})
+        self.assertFalse(any(a.get("error") for a in actions))
+        self.assertTrue(Path(report["worktree"]).is_dir())
+        self.assertIn("kept:", gc.render(actions, applied=True))
+        # The first pass removed the run record; restore it so the forced pass sees the run again.
+        dispatch.write_state(env["id"], phase="replied", status="ok", finished=time.time() - 30 * 86400)
+        forced = gc.apply(gc.plan(self.cfg, "claude-code", now=later, force=True))
+        self.assertTrue(all(a["done"] for a in forced if a["kind"] in ("worktree", "branch")), forced)
+        self.assertFalse(Path(report["worktree"]).exists())
+
     def test_cutoff_never_shorter_than_the_replay_window(self):
-        with self.assertRaises(gc.GcError):
-            gc.plan(self.cfg, "claude-code", days=3)
+        for days, cfg_age in ((3, None), (0, None), (-1, None), (30, 0), (30, "x")):
+            if cfg_age is not None:
+                self.cfg["dispatch"]["max_age_hours"] = cfg_age
+            with self.subTest(days=days, max_age=cfg_age), self.assertRaises(gc.GcError):
+                gc.plan(self.cfg, "claude-code", days=days)
 
 
 if __name__ == "__main__":

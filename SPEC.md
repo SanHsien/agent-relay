@@ -411,9 +411,15 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 "dispatch": {"max_concurrent": 2, "queue_wait_minutes": 240, "daily_limit": 20}
 ```
 
-- **並發**：`max_concurrent` 設定這台機器同時最多跑幾個工人。每個名額是 `runs/.slots/slot-<k>` 的 O_EXCL 檔，內容記錄 pid。擁有者行程不在了，名額就會被收回。沒有空位時，派工會在自己的分頁裡排隊：lease 的 phase 是 `queued`，每 15 秒檢查一次，超過 `queue_wait_minutes`（預設 240）就回 `deferred`。名額在派工結束時釋放，不論成功或失敗。
-- **每日上限**：`daily_limit` 計算的是今天（本機日期）真正拿到工人的派工張數，紀錄在 `runs/.ledger/<日期>.txt`。達到上限就回 `deferred`，不會開工人。上限檢查放在寄件者與簽章驗證之後，所以冒名的信不會占掉額度。
-- **一張工單只跑一個工人**：本機 lease 的 phase 若是 `running`／`queued`，而且那個 pid 還活著，第二次觸發一律拒絕，`--force` 也一樣。被拒的那次不回信、不 ack，原本那次照常回信。
+- **並發**：`max_concurrent` 設定這台機器同時最多跑幾個工人。每個名額是 `runs/.slots/slot-<id>` 檔案，內容是 pid 與到期時間。下列三種情況下名額會被收回：
+  - 擁有者行程已經不在；
+  - 該工單已回信（pid 被重用時，靠這點認出名額已無主）；
+  - 超過到期時間。
+
+  「清掉失效名額、數名額、判斷每日上限、佔名額、記帳」這幾步，全部在同一把 `runs/.limits.lock`（O_EXCL，只持有幾毫秒）裡完成。同時開的分頁不可能都看到空位或都看到還有額度。沒有空位時，派工會在自己的分頁裡排隊：lease 的 phase 是 `queued`，每 15 秒檢查一次，超過 `queue_wait_minutes`（預設 240）就回 `deferred`。名額在派工結束時釋放，不論成功或失敗。
+- **每日上限**：`daily_limit` 計算的是今天（本機日期）真正拿到工人的派工張數，紀錄在 `runs/.ledger/<日期>.txt`。達到上限就回 `deferred`，不會開工人。排隊中的派工每次重試都會重新檢查。
+- **排隊中當掉**：排隊中的分頁如果當掉，下一輪 `watch` 一樣會補 `interrupted`（第 7 節）。排隊期間每 15 秒會刷新一次期限，所以還活著的排隊不會被誤補。上限檢查放在寄件者與簽章驗證之後，所以冒名的信不會占掉額度。
+- **一張工單只跑一個工人**：開跑前，在同一把鎖裡建立 `runs/<id>/.owner` 持有紀錄；回信後才刪掉。持有者還活著時，第二次觸發一律拒絕，`--force` 也一樣；舊版 relay 留下、phase 為 `running`／`queued` 且 pid 還活著的 lease 也算。被拒的那次不回信、不 ack，原本那次照常回信。
 - 費用：回信附上每次嘗試的用量。目前只有 hermes 會提供用量；claude／codex 的花費看各自的額度工具（SPEC §10）。
 
 ## 16. 總覽與收件端心跳（`relay status`）
@@ -439,12 +445,13 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
 
 | 項目 | 條件 |
 | --- | --- |
-| worktree `<repo>/.relay-worktrees/<id>` | 已回信超過 N 天。repo 來源是 `--repo` 與 `dispatch.repo_roots` 底下各 repo |
-| 本機分支 `relay/<id>` | 同上，先刪 worktree 再刪分支 |
-| origin 上的 `relay/<id>` | 同上，而且必須是**這台機器推上去的**（state 記錄的 `pushed_ref`），還要指揮者已回 `accepted:`／`rejected:` 的 note。指揮者還沒驗收的分支保留 |
+| worktree `<repo>/.relay-worktrees/<id>` | 已回信超過 N 天。repo 來源是 `--repo` 與 `dispatch.repo_roots` 底下的各個 repo。有未 commit 檔案的 worktree 會保留，除非成果已推送且已驗收，或加了 `--force` |
+| 本機分支 `relay/<id>` | 同上，先刪 worktree 再刪分支。推送過的分支（commit 在 origin 上也有）直接刪；沒推送過的只用 `git branch -d`，未合併就保留，除非加了 `--force` |
+| origin 上的 `relay/<id>` | 同上，而且必須是**這台機器推上去的**（state 記錄的 `pushed_ref` 與 `repo`），也必須已收到指揮者的 `accepted:`／`rejected:` note。指揮者還沒驗收的分支保留。是否刪除不受本機分支是否還在影響 |
 | `runs/<id>/` | 同上 |
-| 自己信箱 `done/` 的信 | `created_at` 超過 N 天。刪除後由 relay commit 並同步，git 歷史仍保留 |
+| 自己信箱 `done/` 的信 | `created_at` 超過 N 天。刪除後由 relay commit 並同步，git 歷史仍保留。若某張工單的 run 紀錄還留著，它的 `accepted:`／`rejected:` note 也保留，因為那是日後刪遠端分支的依據 |
 | `accepts/<回信 id>/`（指揮者端驗收 log） | 最後修改超過 N 天 |
 
-- N 不能短於 `dispatch.max_age_hours`（預設 7 天）。本機 run 紀錄是擋重放簽章信的依據（第 13 節），在信件還可能被接受的期間內不能刪。
+- N 必須是正數，而且不能短於 `dispatch.max_age_hours`（預設 7 天）。`max_age_hours` 不是正數時，gc 拒絕執行：這時舊的簽章信永遠會被接受，只剩本機 run 紀錄能擋重放（第 13 節）。
+- 被保留的項目會標示 `kept: <git 的原因>`，不算失敗。
 - git 操作會關掉 hooks。某一項失敗時只記錄在該項，不影響其他項；有失敗時退出碼為 9。

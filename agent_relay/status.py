@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, config
+from .procs import pid_alive
 
 SCHEMA = "agent-relay/heartbeat@1"
 DEFAULT_HEARTBEAT_MIN = 30
@@ -40,8 +41,6 @@ def _parse(value: str) -> float | None:
 
 def local_leases(now: float | None = None) -> list[dict]:
     """Dispatch runs on this machine that have not answered yet (running or queued)."""
-    from .dispatch import pid_alive  # late import: dispatch is heavy and imports cli-free modules only
-
     now = now or time.time()
     out = []
     runs = config.home() / "runs"

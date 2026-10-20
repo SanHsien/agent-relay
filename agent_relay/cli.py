@@ -330,7 +330,7 @@ def cmd_status(args, cfg) -> int:
 def cmd_gc(args, cfg) -> int:
     agent = _agent(args, cfg)
     try:
-        actions = relay_gc.plan(cfg, agent, args.older_than, args.repo)
+        actions = relay_gc.plan(cfg, agent, args.older_than, args.repo, force=args.force)
     except relay_gc.GcError as exc:
         raise SystemExit(f"error: {exc}") from exc
     if args.apply:
@@ -338,7 +338,7 @@ def cmd_gc(args, cfg) -> int:
         if any(a["kind"] == "done-mail" and a.get("done") for a in actions):
             _sync(args, cfg, f"relay: {agent} gc {sum(a['kind'] == 'done-mail' for a in actions)} done messages")
     _out(args, actions, relay_gc.render(actions, args.apply))
-    return 0 if all(a.get("done", True) for a in actions) else 9
+    return 9 if any(a.get("error") for a in actions) else 0
 
 
 def cmd_watch(args, cfg) -> int:
@@ -481,6 +481,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", action="append", default=[], help="also look in this repo (repo_roots are scanned)")
     s.add_argument("--agent")
     s.add_argument("--apply", action="store_true", help="really delete (default: dry run)")
+    s.add_argument("--force", action="store_true",
+                   help="also remove dirty worktrees and unmerged branches of work never accepted")
     s.set_defaults(func=cmd_gc)
 
     s = sub.add_parser("inbox", help="list open messages")
