@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, doorbell, envelope, gitsync, poller
+from . import config, doorbell, envelope, gitsync, locks, poller
 from . import context as handover
 from . import dispatch as dispatcher
 from .store import Store, StoreError
@@ -60,6 +60,8 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
     if not args.repo:
         raise SystemExit("--run needs --repo (receiver-side path or asr:<session>)")
     spec = {"runtime": args.run, "repo": args.repo, "mode": args.mode, "timeout_minutes": args.timeout}
+    if args.path:
+        spec["paths"] = args.path
     if args.model:
         spec["model"] = args.model
     if args.effort:
@@ -72,6 +74,41 @@ def cmd_dispatch(args, cfg) -> int:
     text = chr(10).join(f"{k}: {v}" for k, v in report.items())
     _out(args, report, text)
     return 0 if report["status"] == "ok" else 4
+
+
+def cmd_claim(args, cfg) -> int:
+    holder = args.holder or os.environ.get("AGENT_RELAY_HOLDER") or f"manual:{_agent(args, cfg)}"
+    if not args.no_sync:
+        gitsync.pull(Path(cfg["store"]))
+    try:
+        claim = locks.checkout(Path(cfg["store"]), Path(args.repo or "."), holder, args.path, args.ttl * 60)
+    except locks.ClaimConflict as exc:
+        _out(args, {"blocked": str(exc), "holders": exc.holders}, f"blocked: {exc}")
+        return 5
+    _sync(args, cfg, f"relay: checkout {claim['id']} by {holder}")
+    _out(args, claim, f"claimed {claim['id']} ({', '.join(claim['paths'])}) until {claim['expires_at']}")
+    return 0
+
+
+def cmd_release(args, cfg) -> int:
+    store = Path(cfg["store"])
+    for claim in locks.active_claims(store, locks.repo_key(locks.repo_id(Path(args.repo or ".")))):
+        if claim["id"] == args.claim_id:
+            locks.release(store, claim, changed=args.changed or [])
+            _sync(args, cfg, f"relay: release {claim['id']}")
+            _out(args, {"released": claim["id"]}, f"released {claim['id']}")
+            return 0
+    _out(args, {"error": "no such active claim"}, f"no active claim {args.claim_id} in this repo")
+    return 2
+
+
+def cmd_claims(args, cfg) -> int:
+    if not args.no_sync:
+        gitsync.pull(Path(cfg["store"]))
+    claims = locks.active_claims(Path(cfg["store"]), locks.repo_key(locks.repo_id(Path(args.repo or "."))))
+    text = chr(10).join(f"{c['id']}  {c['holder']:>24}  until {c['expires_at']}  {', '.join(c['paths'])}" for c in claims)
+    _out(args, claims, text or "(no active claims)")
+    return 0
 
 
 def cmd_context(args, cfg) -> int:
@@ -240,7 +277,26 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--model")
     g.add_argument("--effort")
     g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
+    g.add_argument("--path", action="append", help="file pattern the worker may change (checked out); repeatable")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("claim", help="check out file patterns of a repo before changing them")
+    s.add_argument("--repo")
+    s.add_argument("--path", action="append", required=True)
+    s.add_argument("--holder", help="who holds it (default: AGENT_RELAY_HOLDER or manual:<agent>)")
+    s.add_argument("--ttl", type=int, default=60, help="minutes")
+    s.add_argument("--agent")
+    s.set_defaults(func=cmd_claim)
+
+    s = sub.add_parser("release", help="check a claim back in")
+    s.add_argument("claim_id")
+    s.add_argument("--repo")
+    s.add_argument("--changed", action="append", help="file actually changed; repeatable")
+    s.set_defaults(func=cmd_release)
+
+    s = sub.add_parser("claims", help="list active claims of a repo")
+    s.add_argument("--repo")
+    s.set_defaults(func=cmd_claims)
 
     s = sub.add_parser("context", help="print a repo's hand-over bundle (or act as a SessionStart hook)")
     s.add_argument("--repo", help="repository folder (default: current folder)")

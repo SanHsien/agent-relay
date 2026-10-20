@@ -13,7 +13,7 @@ from pathlib import Path
 
 PUSH_RETRIES = 3
 TIMEOUT = 120
-MAILBOX_SPEC = ("mailboxes", ":(exclude,glob)mailboxes/**/.tmp-*")
+SHARED_DIRS = ("mailboxes", "claims", "audit")  # everything relay shares between machines
 
 
 class SyncError(RuntimeError):
@@ -65,16 +65,23 @@ def pull(root: Path) -> None:
 
 
 def commit(root: Path, message: str) -> bool:
-    """Stage mailboxes/ only and commit. Returns False when there was nothing to commit."""
+    """Stage relay's own folders only and commit. Returns False when there was nothing to commit."""
     root = Path(root)
-    if not is_repo(root) or not (root / "mailboxes").is_dir():
+    dirs = [d for d in SHARED_DIRS if (root / d).is_dir() or _tracked(root, d)]
+    if not is_repo(root) or not dirs:
         return False
-    _git(root, "add", "-A", "--", *MAILBOX_SPEC)
-    staged = _git(root, "diff", "--cached", "--quiet", "--", "mailboxes", check=False)
+    excludes = [f":(exclude,glob){d}/**/.tmp-*" for d in dirs] + [f":(exclude,glob){d}/**/.lock" for d in dirs]
+    _git(root, "add", "-A", "--", *dirs, *excludes)
+    staged = _git(root, "diff", "--cached", "--quiet", "--", *dirs, check=False)
     if staged.returncode == 0:
         return False
-    _git(root, "commit", "--quiet", "-m", message, "--", "mailboxes")
+    _git(root, "commit", "--quiet", "-m", message, "--", *dirs)
     return True
+
+
+def _tracked(root: Path, folder: str) -> bool:
+    """A shared folder that was deleted locally (last claim released) still needs its removal committed."""
+    return bool(_git(root, "ls-files", "--", folder, check=False).stdout.strip())
 
 
 def push(root: Path) -> None:

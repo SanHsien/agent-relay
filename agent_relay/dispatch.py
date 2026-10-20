@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, context, doorbell, envelope, gitsync
+from . import config, context, doorbell, envelope, gitsync, locks
 from .context import redact
 from .store import Store
 
@@ -83,6 +83,11 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError("dispatch.model must look like a model id")
     if "effort" in spec and spec["effort"] not in EFFORTS:
         raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
+    if "paths" in spec:
+        try:
+            spec["paths"] = locks.validate_paths(spec["paths"])
+        except ValueError as exc:
+            raise envelope.EnvelopeError(f"dispatch.paths: {exc}") from exc
     return spec
 
 
@@ -91,6 +96,8 @@ def policy_check(env: dict, spec: dict, policy: dict) -> Path:
     senders = policy.get("senders")
     if senders is not None and env["from"] not in senders:
         raise DispatchError(f"sender {env['from']!r} not in dispatch.senders {senders}")
+    if policy.get("require_paths") and not spec.get("paths"):
+        raise DispatchError("this machine requires dispatch.paths (the files the worker may change)")
     allowed = policy.get("runtimes") or []
     if spec["runtime"] not in allowed:
         raise DispatchError(f"runtime {spec['runtime']!r} not in this machine's dispatch.runtimes {allowed}")
@@ -286,13 +293,15 @@ def _kill_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: str | None = None) -> tuple[str, int | None]:
+def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: str | None = None,
+        extra_env: dict | None = None) -> tuple[str, int | None]:
     """Run argv (argv[0] already resolved) with a hard timeout. Returns (status, exit code)."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, **(extra_env or {})}
     with open(log_file, "w", encoding="utf-8", errors="replace") as log:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
                                 stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-                                creationflags=CREATE_NO_WINDOW)
+                                creationflags=CREATE_NO_WINDOW, env=env)
         if stdin_text is not None:
             try:
                 proc.stdin.write(stdin_text.encode("utf-8"))
@@ -333,6 +342,43 @@ def final_text(log_file: Path, limit: int = 4000) -> str:
         if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
             return item["text"][-limit:]
     return text[-limit:]
+
+
+def changed_files(worktree: Path, base: str) -> list[str]:
+    """Repo-relative files the worker touched: committed since base, modified, or new."""
+    try:
+        committed = _git(worktree, "diff", "--name-only", base).splitlines()
+        status = _git(worktree, "status", "--porcelain", "--untracked-files=all").splitlines()
+    except DispatchError:
+        return []
+    files = {line.strip() for line in committed if line.strip()}
+    for line in status:
+        path = line[3:].strip().strip('"')
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        if path:
+            files.add(path)
+    return sorted(files)
+
+
+def predict_conflicts(repo: Path, base: str, changed: list[str], store: Path, claim: dict) -> str:
+    """Before anyone merges: which changed files the main line also moved, and who else holds them."""
+    notes = []
+    try:
+        moved = set(_git(repo, "diff", "--name-only", base, "HEAD").split())
+    except DispatchError:
+        moved = set()
+    both = sorted(moved & set(changed))
+    notes.append("主線自 base 起也改過、合併可能衝突：" + (", ".join(both) if both else "無"))
+    others = []
+    for other in locks.active_claims(store, claim["key"]):
+        if other["id"] == claim["id"]:
+            continue
+        hit = [f for f in changed if any(locks.match_path(f, p) for p in other["paths"])]
+        if hit:
+            others.append(f"{other['holder']}（{', '.join(hit)}）")
+    notes.append("目前被別人簽出、合併前要協調：" + ("；".join(others) if others else "無"))
+    return "\n".join(notes)
 
 
 def changes(worktree: Path, base: str) -> str:
@@ -406,6 +452,8 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
     env = store.read(agent, env_id)
     run_dir = config.home() / "runs" / env_id
     report: dict = {"id": env_id, "status": "refused"}
+    claim: dict | None = None
+    changed: list[str] = []
     try:
         if env["kind"] != "task" or "dispatch" not in env:
             raise DispatchError("not a task with a dispatch section")
@@ -415,6 +463,16 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
         repo = policy_check(env, spec, cfg.get("dispatch") or {})
         plan = spec.get("mode", "build") == "plan"
+        holder = f"relay:{env_id}"
+        if spec.get("paths") and not plan:
+            # Check out the files before anyone starts: an overlapping claim means refused.
+            try:
+                claim = locks.checkout(Path(cfg["store"]), repo, holder, spec["paths"],
+                                       timeout_s + LEASE_GRACE_S, env=env_id, agent=agent, sender=env["from"])
+            except locks.ClaimConflict as exc:
+                raise DispatchError(f"blocked: {exc}") from exc
+            if sync:
+                _sync(cfg, f"relay: {agent} checkout {claim['id']} for {env_id}")
         worktree, branch, base = make_worktree(repo, env_id)
         marker = _git_marker(worktree)
         # The worker starts with the repo's hand-over bundle instead of a pasted context.
@@ -431,8 +489,19 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                                               f"relay-{env_id}", run_dir, worktree, cfg)
         argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
         started = time.monotonic()
-        status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text)
-        commit = "plan mode: nothing to commit" if plan else commit_work(worktree, env_id, marker)
+        status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
+                           extra_env={"AGENT_RELAY_HOLDER": holder})
+        changed = changed_files(worktree, base)
+        scope_note, outside = "", []
+        if claim:
+            outside = locks.out_of_scope(changed, claim["paths"])
+            scope_note = predict_conflicts(repo, base, changed, Path(cfg["store"]), claim)
+        if plan:
+            commit = "plan mode: nothing to commit"
+        elif outside:
+            commit = "skipped: 改到簽出範圍外的檔案，未 commit：" + ", ".join(outside[:20])
+        else:
+            commit = commit_work(worktree, env_id, marker)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
                       worktree=str(worktree), branch=branch, seconds=round(time.monotonic() - started),
                       log=str(run_dir / "output.log"))
@@ -442,13 +511,23 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             f"log（收件端機器）: {run_dir / 'output.log'}\n\n"
             f"## 工人最後回報\n{final_text(run_dir / 'output.log')}\n\n"
             f"## 變更\n```text\n{changes(worktree, base)}\n```\n"
+            + (f"\n## 範圍與衝突預測\n簽出範圍：{', '.join(claim['paths'])}\n{scope_note}\n" if claim else "")
         )
+        if outside:
+            report["status"] = "out-of-scope"
+            body = body.replace(f"status: {status}", "status: out-of-scope", 1)
     except (DispatchError, envelope.EnvelopeError, FileNotFoundError, PermissionError) as exc:
         report["error"] = str(exc)
         body = f"status: refused\n原因: {exc}\n"
     except Exception as exc:  # anything else still owes the sender an answer
         report.update(status="error", error=f"{type(exc).__name__}: {exc}")
         body = f"status: error\n原因: {type(exc).__name__}: {exc}\n"
+    finally:
+        if claim:
+            try:
+                locks.release(Path(cfg["store"]), claim, changed=changed, env=env_id, status=report["status"])
+            except OSError as exc:
+                doorbell._log(f"dispatch {env_id}: release failed: {exc}")
     report["reply_id"] = _reply(store, agent, env, report["status"], body)["id"]
     if sync:
         _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")

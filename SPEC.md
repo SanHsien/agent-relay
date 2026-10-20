@@ -199,3 +199,24 @@ git 狀態                                  分支、已追蹤但未提交的檔
 ```json
 "context": {"obsidian_vault": "C:/Users/<you>/Documents/Obsidian/MyVault", "hot_cache": false, "sessions": true}
 ```
+
+## 9. 簽出鎖與打卡紀錄（check-out / check-in）
+
+多個 agent 同時改同一個 repo 時，先簽出要改的檔案，改完簽入；簽出重疊就擋下。
+
+```text
+<store>/claims/<repo key>/<claim id>.json         有效的簽出：holder、paths、到期時間
+<store>/audit/<YYYY-MM-DD>/<時間>-<claim>-<事件>.json   打卡紀錄：checkout／checkin／blocked（每事件一檔，跨機器合併不衝突）
+~/.agent-relay/touch-log.jsonl                    本機紀錄：checkout-guard 對每次改檔的放行／擋下
+```
+
+- **repo 身分**：`origin` 的 URL（去掉帳密、統一成 https、去掉 `.git`、小寫）；沒有 remote 就用本機 git 目錄。同一個 repo 的 worktree 身分相同。`<repo key>` = 名稱 slug + 身分的 SHA-1 前 12 碼。
+- **路徑規則**：repo 相對路徑，`**` 跨層，結尾 `/` 代表整個資料夾；比對不分大小寫。不可用 `..` 或磁碟機代號跳出 repo。兩個 claim 是否重疊，沿用 [claude-code-projects-workflow](https://github.com/SanHsien/claude-code-projects-workflow) 的 `may_overlap` 保守判斷：可能碰到同一個（即使還不存在的）檔案就算重疊。
+- **簽出**：本機以 `claims/<key>/.lock`（O_EXCL）把「檢查＋寫入」包成一步，同機器上不會兩個都成功。跨機器靠 git 同步，對方 pull 後才看得到；兩台機器在同一輪同時簽出時，可能都成功，這時衝突預測（下面）會在回信裡點出來。
+- **派工**：task 信的 `dispatch.paths` 就是工人可以改的檔案範圍。relay 在開 worktree 前簽出（holder = `relay:<信件 id>`，期限 = 逾時 + 10 分鐘），重疊就回 `status: refused`，原因寫明誰持有哪些檔案、到何時。收件端可設 `dispatch.require_paths: true` 要求每封派工都要寫範圍。
+- **施工後**：
+  - 工人改到範圍外的檔案 → 不 commit，回 `status: out-of-scope` 並列出那些檔案。
+  - **衝突預測**：列出「主線自 base 起也改過」的檔案，以及「目前被別人簽出」的檔案，合併前先處理。
+  - 不論結果都簽入（刪除 claim），打卡紀錄寫下實際改了哪些檔案。
+- **互動 session**：[harness-guard](https://github.com/SanHsien/harness-guard) 的 `checkout-guard`（PreToolUse：Edit、Write、MultiEdit、NotebookEdit）讀本機 store 的 claim；要改的檔案被別人簽出就擋下（exit 2，說明持有者）。「我」= `AGENT_RELAY_HOLDER`（relay 會替它開的工人設好），否則 `manual:<config 的 agent>`，與 `relay claim` 的預設一致。
+- **手動簽出**：`relay claim --repo . --path calc.py --ttl 60`、`relay claims --repo .`、`relay release <claim id> --changed calc.py`。
