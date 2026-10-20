@@ -62,6 +62,10 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(self.allowed.read_text(encoding="utf-8"), before)
         with self.assertRaises(signing.SigningError):
             signing.trust(self.allowed, "x", "not a key")
+        for name in ("*", "commander,mallory", "a b", 'x" cert-authority'):
+            with self.subTest(name=name), self.assertRaises(signing.SigningError):
+                signing.trust(self.allowed, name, self.pub)
+        self.assertEqual(self.allowed.read_text(encoding="utf-8"), before)
 
     def test_keygen_never_overwrites(self):
         with self.assertRaises(signing.SigningError):

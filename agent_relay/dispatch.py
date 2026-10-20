@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import advisor, config, context, doorbell, envelope, gates, gitsync, locks, signing
@@ -42,8 +43,10 @@ from .store import Store
 RUNTIMES = ("claude", "codex", "agy", "hermes")
 MODES = ("build", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh")
+BASE_RE = re.compile(r"[0-9a-f]{7,40}")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}")
 DEFAULT_TIMEOUT_MIN = 30
+DEFAULT_MAX_AGE_H = 168  # a signed task older than a week is not run (limits replays of old mail)
 MAX_TIMEOUT_MIN = 120
 LEASE_GRACE_S = 600
 PID_TRUST_S = 1800  # past deadline by this much, a live-looking pid is assumed reused
@@ -142,6 +145,8 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError("dispatch.model must look like a model id")
     if "effort" in spec and spec["effort"] not in EFFORTS:
         raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
+    if "base" in spec and not (isinstance(spec["base"], str) and BASE_RE.fullmatch(spec["base"])):
+        raise envelope.EnvelopeError("dispatch.base must be a commit sha (7-40 lowercase hex)")
     for flag in ("tdd", "escalate"):
         if flag in spec and not isinstance(spec[flag], bool):
             raise envelope.EnvelopeError(f"dispatch.{flag} must be true or false")
@@ -171,6 +176,13 @@ def policy_check(env: dict, spec: dict, policy: dict, allowed_signers: Path | No
         if problem:
             raise DispatchError(f"signature check failed for sender {env['from']!r}: {problem} "
                                 "(see SPEC section 13; dispatch.require_signature)")
+    max_age_h = policy.get("max_age_hours", DEFAULT_MAX_AGE_H)
+    if isinstance(max_age_h, (int, float)) and not isinstance(max_age_h, bool) and max_age_h > 0:
+        created = datetime.fromisoformat(str(env["created_at"]).replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if time.time() - created.timestamp() > max_age_h * 3600:
+            raise DispatchError(f"task is older than dispatch.max_age_hours ({max_age_h}); ask the sender to send it again")
     if policy.get("require_paths") and not spec.get("paths"):
         raise DispatchError("this machine requires dispatch.paths (the files the worker may change)")
     allowed = policy.get("runtimes") or []
@@ -224,19 +236,49 @@ def _registered_branch(repo: Path, path: Path) -> str | None:
     return None
 
 
-def make_worktree(repo: Path, env_id: str) -> tuple[Path, str, str]:
-    """Create <repo>/.relay-worktrees/<id> on branch relay/<id>. Returns (path, branch, base)."""
+def resolve_base(repo: Path, base: str) -> str:
+    """The full sha of the sender's pinned base commit, fetching origin once if it is not here yet."""
+    def lookup() -> str | None:
+        try:
+            return _git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", base + "^{commit}").strip()
+        except DispatchError:
+            return None
+
+    found = lookup()
+    if found is None:
+        try:
+            _git(repo, "-c", "core.hooksPath=" + os.devnull, "fetch", "--quiet", "--no-tags", "origin")
+        except DispatchError as exc:
+            doorbell._log(f"fetch for base {base} failed: {exc}")
+        found = lookup()
+    if found is None:
+        raise DispatchError(f"dispatch.base {base} is not a commit in {repo} (fetched origin, still missing)")
+    return found
+
+
+def make_worktree(repo: Path, env_id: str, base: str | None = None) -> tuple[Path, str, str]:
+    """Create <repo>/.relay-worktrees/<id> on branch relay/<id>. Returns (path, branch, base).
+
+    The worktree starts at the sender's pinned `base` when the task names one, else
+    at the receiver's HEAD (which may be any branch, with any local commits).
+    """
     branch = f"relay/{env_id}"
     path = repo / WORKTREE_DIR / env_id
     _exclude(repo)
+    pinned = resolve_base(repo, base) if base else None
     if path.exists():
         # Only reuse what is provably our own worktree; a stray folder would put the
         # worker inside the main checkout.
         if _registered_branch(repo, path) != branch:
             raise DispatchError(f"{path} exists but is not the {branch} worktree")
-        base = _git(repo, "merge-base", "HEAD", branch).strip()
+        if pinned:
+            if _git(repo, "merge-base", pinned, branch).strip() != pinned:
+                raise DispatchError(f"{branch} does not start from dispatch.base {base}")
+            base = pinned
+        else:
+            base = _git(repo, "merge-base", "HEAD", branch).strip()
     else:
-        base = _git(repo, "rev-parse", "HEAD").strip()
+        base = pinned or _git(repo, "rev-parse", "HEAD").strip()
         _git(repo, "worktree", "add", "--quiet", "-b", branch, str(path), base)
     return path, branch, base
 
@@ -634,10 +676,20 @@ def read_state(env_id: str) -> dict | None:
         return None
 
 
-def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dict | None = None) -> dict:
+def result_fields(report: dict) -> dict:
+    """The machine-readable part of a dispatch reply (SPEC section 7): what `relay accept` reads."""
+    fields = {"status": report["status"], "runtime": report.get("runtime"), "branch": report.get("branch"),
+              "commit": report.get("commit_sha"), "base": report.get("base"), "gate": report.get("gate"),
+              "usage": report.get("usage")}
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def _reply(store: Store, agent: str, env: dict, status: str, body: str, cfg: dict | None = None,
+           result: dict | None = None) -> dict:
     reply = envelope.build(sender=agent, to=env["from"], subject=f"{status}: {env['subject']}"[:200],
                            body=redact(body), kind="result", reply_to=env["id"], thread=env.get("thread"),
-                           priority="normal" if status == "ok" else "high")
+                           priority="normal" if status == "ok" else "high",
+                           result=result or {"status": status})
     key = signing.settings(cfg, config.home())[0] if cfg else None
     if key:
         try:
@@ -676,6 +728,10 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         raise DispatchError(f"no message {env_id} in mailbox {agent}")
     if hit[0] == "done" and not force:
         raise DispatchError(f"{env_id} is already done; pass --force to run it again")
+    # The store's new/cur/done folders can be rewritten by anyone who can push to it
+    # (move a signed, done task back to new/). This machine's own run record cannot.
+    if (read_state(env_id) or {}).get("phase") == "replied" and not force:
+        raise DispatchError(f"{env_id} was already run and answered on this machine; pass --force to run it again")
     env = store.read(agent, env_id)
     run_dir = config.home() / "runs" / env_id
     report: dict = {"id": env_id, "status": "refused"}
@@ -713,7 +769,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 raise DispatchError(f"blocked: {exc}") from exc
             if sync:
                 _sync(cfg, f"relay: {agent} checkout {claim['id']} for {env_id}")
-        worktree, branch, base = make_worktree(repo, env_id)
+        worktree, branch, base = make_worktree(repo, env_id, spec.get("base"))
         marker = _git_marker(worktree)
         # The worker starts with the repo's hand-over bundle instead of a pasted context.
         # Session tails can hold tool output, and the reply goes into git history, so
@@ -836,8 +892,10 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         else:
             commit = commit_work(worktree, env_id, marker)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
-                      worktree=str(worktree), branch=branch, seconds=round(time.monotonic() - started),
+                      worktree=str(worktree), branch=branch, base=base, seconds=round(time.monotonic() - started),
                       log=str(run_dir / "output.log"))
+        if commit.startswith("committed:"):
+            report["commit_sha"] = _git(worktree, "rev-parse", "HEAD").strip()
         body = (
             f"status: {status}（exit {code}）\nruntime: {spec['runtime']}（指令由 {source} 組）\n"
             f"worktree: {worktree}\nbranch: {branch}\nrelay commit: {commit}\n耗時: {report['seconds']} 秒\n"
@@ -878,7 +936,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 locks.release(Path(cfg["store"]), claim, changed=changed, env=env_id, status=report["status"])
             except OSError as exc:
                 doorbell._log(f"dispatch {env_id}: release failed: {exc}")
-    report["reply_id"] = _reply(store, agent, env, report["status"], body, cfg)["id"]
+    report["reply_id"] = _reply(store, agent, env, report["status"], body, cfg, result_fields(report))["id"]
     if sync:
         _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")
     return report

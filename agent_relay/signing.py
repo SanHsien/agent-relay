@@ -96,6 +96,10 @@ def verify(env: dict, allowed_signers: Path) -> str | None:
 
 def trust(allowed_signers: Path, agent: str, public_key: str) -> None:
     """Allow public_key to sign as mailbox `agent` (agent-relay namespace only)."""
+    from .envelope import safe_name  # the principal field also takes wildcards and lists: "*" would trust a key for every mailbox
+
+    if not safe_name(agent):
+        raise SigningError(f"not a mailbox name: {agent!r}")
     parts = public_key.split()
     if len(parts) < 2 or not parts[0].startswith(("ssh-", "ecdsa-", "sk-")):
         raise SigningError("not an OpenSSH public key line")

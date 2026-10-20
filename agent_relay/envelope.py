@@ -56,6 +56,7 @@ def build(
     project: str | None = None,
     refs: list[str] | None = None,
     dispatch: dict | None = None,
+    result: dict | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     env_id = new_id(now)
@@ -80,6 +81,8 @@ def build(
         env["refs"] = list(refs)
     if dispatch:
         env["dispatch"] = dispatch
+    if result:
+        env["result"] = result
     validate(env)
     return env
 
@@ -112,6 +115,11 @@ def validate(env: dict) -> None:
     refs = env.get("refs", [])
     if not (isinstance(refs, list) and all(isinstance(r, str) for r in refs)):
         raise EnvelopeError("refs must be a list of strings")
+    if "result" in env:
+        if env["kind"] != "result" or not isinstance(env["result"], dict):
+            raise EnvelopeError("only kind=result may carry a result object")
+        if not isinstance(env["result"].get("status"), str):
+            raise EnvelopeError("result.status is required")
     if "dispatch" in env:
         if env["kind"] != "task":
             raise EnvelopeError("only kind=task may carry a dispatch section")

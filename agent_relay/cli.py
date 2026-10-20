@@ -64,6 +64,8 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
         spec["paths"] = args.path
     if args.tdd:
         spec["tdd"] = True
+    if args.base:
+        spec["base"] = args.base.lower()
     if args.model:
         spec["model"] = args.model
     if args.effort:
@@ -188,7 +190,7 @@ def cmd_send(args, cfg) -> int:
 
 def cmd_keygen(args, cfg) -> int:
     agent = _agent(args, cfg)
-    key = Path(args.key).expanduser() if args.key else signing.default_key(config.home(), agent)
+    key = Path(args.key).expanduser().resolve() if args.key else signing.default_key(config.home(), agent)
     try:
         public = signing.keygen(key, agent)
     except signing.SigningError as exc:
@@ -339,6 +341,7 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
     g.add_argument("--path", action="append", help="file pattern the worker may change (checked out); repeatable")
     g.add_argument("--tdd", action="store_true", help="require a test that fails before the change (red) and passes after")
+    g.add_argument("--base", help="commit sha the worker starts from (receiver fetches origin if needed)")
     s.set_defaults(func=cmd_send)
 
     s = sub.add_parser("advise", help="pick runtime/model for a task from its complexity and local quotas")

@@ -129,6 +129,17 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `mode` | 否 | `build`（預設，工人改 worktree 裡的檔，relay 事後替它 commit）或 `plan`（唯讀） |
 | `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
 | `timeout_minutes` | 否 | 1～120，預設 30。超時就結束整棵行程，回信 `status: timeout` |
+| `base` | 否 | 施工起點的 commit sha（7～40 個小寫 hex）。收件端本機沒有就 `git fetch origin` 一次，仍找不到就 `refused`。沒寫就用收件端當下的 HEAD；那可能在別的分支上，或帶著還沒推送的 commit，所以要把成果帶回去（第 14 節）的派工都應該寫 `base` |
+
+**回信的結構化欄位**：派工回信（`kind=result`）多一個 `result` 物件，給程式讀，不用解析內文。它在簽章範圍內：
+
+```json
+"result": {"status": "ok", "runtime": "hermes", "branch": "relay/<id>", "commit": "<40 位 sha>",
+           "base": "<40 位 sha>", "gate": {"status": "ok", "logs": [{"phase": "green", "exit": 0, "sha256": "…"}]},
+           "usage": [{"attempt": 1, "model": "…", "total_tokens": 0}]}
+```
+
+`commit` 只在 relay 真的 commit 時才有。refused／error 的回信只有 `{"status": …}`。
 
 **收件端政策（config.json 的 `dispatch`，沒設就全部拒絕）**：
 
@@ -335,11 +346,18 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
         relay dispatch ──▶ ssh-keygen -Y verify -I <from> -n agent-relay；不過就 refused
 ```
 
-- **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。原 id 已 `done` 的重放由第 7 節擋下。
+- **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。
+- **原封不動的重放**：能推送 store 的人可以把已簽、已完成的信從 `done/` 搬回 `new/`。收件端看自己本機的 `runs/<id>/state.json`，裡面記錄為已回信就拒絕；這份紀錄不在 store 裡。另外，`created_at` 超過 `dispatch.max_age_hours`（預設 168 小時）的派工一律拒絕，用來限制舊信重放的時間窗。
 - **身分綁信箱**：allowed_signers 的 principal 是信箱名，namespace 限 `agent-relay`。某個金鑰被信任為 `mallory`，不代表它能替 `commander` 簽章。
 - **信任清單只在本機**：金鑰清單不放在 store。如果放在 store，能推送 store 的人就能把自己的金鑰加進去。公鑰交換走 store 以外的管道，例如主人親手在兩台機器各執行一次 `relay trust`。
 - **工具**：只用 OpenSSH 內建的 `ssh-keygen`（Windows 11、Linux、macOS 都有），不需要 GPG。
 - **收件端政策**：`dispatch.require_signature`（預設 `true`）與 `dispatch.senders`（必填）。只在測試環境才關簽章。
-- **設定**：`signing.key` 與 `signing.allowed_signers` 可以改路徑，預設是 `~/.agent-relay/keys/<agent>_ed25519` 與 `~/.agent-relay/allowed_signers`。
+- **設定**：`signing.key` 與 `signing.allowed_signers` 可以改路徑，預設是 `~/.agent-relay/keys/<agent>_ed25519` 與 `~/.agent-relay/allowed_signers`。`trust` 只接受合法的信箱名稱：principal 欄位支援萬用字元與逗號清單，`*` 會讓一把金鑰替所有信箱簽章。
+- **從舊版升級**（2026-10-21 之前的 config）：舊收件端升上來後，所有派工都會變成 `refused`。要做三件事：
+  1. 收件端在 `dispatch` 補上 `"senders": [...]`；
+  2. 寄件端執行 `relay keygen`；
+  3. 收件端執行 `relay trust <寄件信箱> <公鑰>`。
+
+  收件端也執行 `keygen`，並讓寄件端 `trust` 它，回信就會帶簽章。
 - **回信也簽**：收件端有金鑰時，派工回信（含 `interrupted`）也會簽章，指揮者 `relay accept`（第 14 節）可以據此確認回信真的來自收件端。簽章失敗時照樣送出未簽的回信，並記入 log：回信一定要送到。
 - **已知限制**：私鑰沒有密碼，保護靠檔案權限（ssh-keygen 建立時只給目前使用者）。拿得到收件端使用者帳號的人本來就能直接執行程式，不在這個威脅模型內。

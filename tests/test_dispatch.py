@@ -273,11 +273,84 @@ class SenderTrustTests(DispatchBase):
                 self.assertIn(reason, self.reply_for(env)["body"])
                 self.assertFalse((self.repo / dispatch.WORKTREE_DIR / env["id"]).exists())
 
+    def test_replay_of_a_done_task_refused(self):
+        env = self.send_signed(self.commander_key)
+        self.assertEqual(self.run_fake(env)["status"], "ok")
+        # Someone with push access moves the signed, done task back to new/.
+        done = next((self.dir / "store" / "mailboxes" / "claude-code" / "done").glob(env["id"] + "*"))
+        os.replace(done, done.parent.parent / "new" / done.name)
+        with self.assertRaises(dispatch.DispatchError) as ctx:
+            self.run_fake(env)
+        self.assertIn("already run and answered", str(ctx.exception))
+
+    def test_old_task_refused(self):
+        env = self.send_signed(self.commander_key)
+        self.cfg["dispatch"]["max_age_hours"] = 1
+        with mock.patch.object(dispatch.time, "time", return_value=time.time() + 7200):
+            report = self.run_fake(env)
+        self.assertEqual(report["status"], "refused")
+        self.assertIn("max_age_hours", self.reply_for(env)["body"])
+
     def test_no_senders_means_no_one(self):
         self.cfg["dispatch"].pop("senders")
         env = self.send_signed(self.commander_key)
         self.assertEqual(self.run_fake(env)["status"], "refused")
         self.assertIn("accepts dispatch tasks from no one", self.reply_for(env)["body"])
+
+
+class BaseAndResultTests(DispatchBase):
+    """T-20261021-08: the sender pins the start commit; the reply carries machine-readable fields."""
+
+    def head(self, repo):
+        return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+    def test_base_format(self):
+        for bad in ("HEAD", "main", "--upload-pack=x", "abc", "A" * 40, 7):
+            with self.subTest(bad=bad), self.assertRaises(envelope.EnvelopeError):
+                dispatch.validate_spec({"runtime": "claude", "repo": "x", "base": bad})
+
+    def test_worktree_starts_at_pinned_base_and_reply_has_result(self):
+        pinned = self.head(self.repo)
+        (self.repo / "local.txt").write_text("receiver-only commit\n", encoding="utf-8")
+        git("add", ".", cwd=self.repo)
+        git("commit", "--quiet", "-m", "local", cwd=self.repo)
+        env = self.send_task(base=pinned[:10])
+        report = self.run_fake(env)
+        self.assertEqual(report["status"], "ok", report)
+        self.assertEqual(report["base"], pinned)
+        self.assertFalse((Path(report["worktree"]) / "local.txt").exists())
+        result = self.reply_for(env)["result"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["base"], pinned)
+        self.assertEqual(result["branch"], f"relay/{env['id']}")
+        self.assertEqual(result["commit"], self.head(report["worktree"]))
+        self.assertEqual(len(result["commit"]), 40)
+
+    def test_base_fetched_from_origin(self):
+        upstream = self.dir / "upstream"
+        subprocess.run(["git", "clone", "--quiet", str(self.repo), str(upstream)], check=True, capture_output=True)
+        (upstream / "new.txt").write_text("only upstream has this\n", encoding="utf-8")
+        git("add", ".", cwd=upstream)
+        git("commit", "--quiet", "-m", "upstream", cwd=upstream)
+        git("remote", "add", "origin", str(upstream), cwd=self.repo)
+        env = self.send_task(base=self.head(upstream))
+        report = self.run_fake(env)
+        self.assertEqual(report["status"], "ok", report)
+        self.assertTrue((Path(report["worktree"]) / "new.txt").exists())
+
+    def test_unknown_base_refused(self):
+        env = self.send_task(base="0" * 40)
+        report = self.run_fake(env)
+        self.assertEqual(report["status"], "refused")
+        self.assertIn("not a commit", self.reply_for(env)["body"])
+        self.assertEqual(self.reply_for(env)["result"], {"status": "refused"})
+        self.assertFalse((self.repo / dispatch.WORKTREE_DIR / env["id"]).exists())
+
+    def test_result_only_on_result_kind(self):
+        with self.assertRaises(envelope.EnvelopeError):
+            envelope.build(sender="a", to="b", subject="x", body="", kind="note", result={"status": "ok"})
+        with self.assertRaises(envelope.EnvelopeError):
+            envelope.build(sender="a", to="b", subject="x", body="", kind="result", result={"branch": "x"})
 
 
 class ExecutableTests(DispatchBase):

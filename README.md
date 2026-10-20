@@ -62,7 +62,7 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 | Hermes 工人（寫入限於 worktree、回信附用量） | `send --run hermes` | 7 | [T-03](docs/evidence/2026-10-21-t03-hermes.md) | T-20261021-03 |
 | 寄件者驗證（信件 SSH 簽章、senders 預設拒絕） | `keygen`、`trust`、`dispatch.require_signature` | 13 | [T-07 簽章](docs/evidence/2026-10-21-t07-signing.md) | T-20261021-07 |
 
-Windows 相容性調研（herdr、magpie、open`send --run claude|codex|agy|hermes`、`dispatch`、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
+Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
 
 ## 生態系總目錄
 
@@ -82,7 +82,7 @@ Windows 相容性調研（herdr、magpie、open`send --run claude|codex|agy|herm
 | Repo | 角色 | 任務 |
 | --- | --- | --- |
 | [agent-cortex](https://github.com/SanHsien/agent-cortex) | Windows 原生控制平面、開新 Session | T-20261018-15 |
-| [open`send --run claude|codex|agy|hermes`、`dispatch`](https://github.com/SanHsien/opencodex) | 通用供應商代理 | T-20261018-15 |
+| [opencodex](https://github.com/SanHsien/opencodex) | 通用供應商代理 | T-20261018-15 |
 | [claude-code-projects-workflow](https://github.com/SanHsien/claude-code-projects-workflow) | Worktree 派工前範圍檢查與衝突預測 | T-20261018-15、T-20261019-07 |
 | [agent-advisor](https://github.com/SanHsien/agent-advisor) | 派工路由與合約 | T-20261017-31、T-20261018-16 |
 | [agy-staff](https://github.com/SanHsien/agy-staff) | Antigravity CLI 當執行端 Worker | T-20261017-31 |
@@ -91,8 +91,8 @@ Windows 相容性調研（herdr、magpie、open`send --run claude|codex|agy|herm
 | [Private Repo: 個人指揮中心] | 指揮中心 | T-20261019-08 |
 | [codebase-memory-mcp](https://github.com/SanHsien/codebase-memory-mcp) | 程式碼知識圖譜 | T-20261019-07 |
 | [Private Repo: 環境審計工具] | 環境審計 | T-20261019-07 |
-| [`send --run claude|codex|agy|hermes`、`dispatch`-reset-checker](https://github.com/SanHsien/codex-reset-checker) | 額度與重置時間查詢 | T-20261018-16 |
-| [`send --run claude|codex|agy|hermes`、`dispatch`-auto-retry](https://github.com/SanHsien/codex-auto-retry) | 限流斷線原地續跑 | T-20261018-16 |
+| [codex-reset-checker](https://github.com/SanHsien/codex-reset-checker) | 額度與重置時間查詢 | T-20261018-16 |
+| [codex-auto-retry](https://github.com/SanHsien/codex-auto-retry) | 限流斷線原地續跑 | T-20261018-16 |
 | [Antigravity-Manager](https://github.com/SanHsien/Antigravity-Manager) | Antigravity 帳號切換 | T-20261018-16 |
 
 ### Phase 3：驗收閉環
