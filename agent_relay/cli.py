@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from . import config, doorbell, envelope, gitsync, poller
+from . import context as handover
 from . import dispatch as dispatcher
 from .store import Store, StoreError
 
@@ -71,6 +72,14 @@ def cmd_dispatch(args, cfg) -> int:
     text = chr(10).join(f"{k}: {v}" for k, v in report.items())
     _out(args, report, text)
     return 0 if report["status"] == "ok" else 4
+
+
+def cmd_context(args, cfg) -> int:
+    if args.hook:
+        return handover.main_hook()
+    text = handover.bundle(Path(args.repo or "."), cfg)
+    print(text or "(nothing to hand over)")
+    return 0
 
 
 def cmd_send(args, cfg) -> int:
@@ -232,6 +241,11 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--effort")
     g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("context", help="print a repo's hand-over bundle (or act as a SessionStart hook)")
+    s.add_argument("--repo", help="repository folder (default: current folder)")
+    s.add_argument("--hook", action="store_true", help="read a Claude Code SessionStart payload on stdin")
+    s.set_defaults(func=cmd_context)
 
     s = sub.add_parser("dispatch", help="run a dispatch task in a worktree and reply with the result")
     s.add_argument("id")

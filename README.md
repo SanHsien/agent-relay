@@ -28,6 +28,13 @@ python -m agent_relay ack <id>
 python -m agent_relay poller install --every 5
 ```
 
+新 session 自動接手（不用貼上下文）：
+
+```powershell
+python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
+# Claude Code SessionStart hook：見 SPEC.md 第 8 節
+```
+
 每個指令加 `--json` 輸出機器可讀格式；加 `--no-sync` 只動本機、不碰 git。
 
 ## 運作方式

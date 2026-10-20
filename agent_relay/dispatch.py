@@ -35,7 +35,8 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, doorbell, envelope, gitsync
+from . import config, context, doorbell, envelope, gitsync
+from .context import redact
 from .store import Store
 
 RUNTIMES = ("claude", "codex", "agy")
@@ -54,12 +55,6 @@ DETACHED_PROCESS, NEW_PROCESS_GROUP, BREAKAWAY_FROM_JOB = 0x00000008, 0x00000200
 # "run the tests" rule would let mail text run arbitrary code (write a conftest.py,
 # then pytest it). Receivers may opt in through dispatch.claude_allowed_tools.
 DEFAULT_CLAUDE_TOOLS: tuple[str, ...] = ()
-
-# Rough shapes of common secrets; worker output goes into git history via the reply.
-SECRET_RE = re.compile(
-    r"(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abpr]-[A-Za-z0-9-]{10,}"
-    r"|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|(?i:bearer)\s+[A-Za-z0-9._-]{20,}|\d{8,10}:[A-Za-z0-9_-]{30,})"
-)
 
 
 class DispatchError(RuntimeError):
@@ -250,7 +245,7 @@ def _prompt_to_stdin(argv: list[str], prompt: str) -> list[str]:
     return out
 
 
-def build_prompt(env: dict, worktree: Path, branch: str, plan: bool) -> str:
+def build_prompt(env: dict, worktree: Path, branch: str, plan: bool, handover: str = "") -> str:
     rules = (
         "只讀不改，最後輸出你的結論與證據。" if plan else
         f"只在這個 worktree 內改檔：{worktree}（分支 {branch}）。不要 commit、不要 push、不要切分支、"
@@ -262,6 +257,7 @@ def build_prompt(env: dict, worktree: Path, branch: str, plan: bool) -> str:
         f"規則：{rules}\n"
         "最後一則訊息用三段回報：做了什麼、驗證證據（指令與輸出）、還沒做的。\n\n"
         f"# {env['subject']}\n\n{env['body']}"
+        + (f"\n\n---\n\n{handover}" if handover else "")
     )
 
 
@@ -336,10 +332,6 @@ def final_text(log_file: Path, limit: int = 4000) -> str:
         if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
             return item["text"][-limit:]
     return text[-limit:]
-
-
-def redact(text: str) -> str:
-    return SECRET_RE.sub("[REDACTED]", text)
 
 
 def changes(worktree: Path, base: str) -> str:
@@ -424,7 +416,9 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         plan = spec.get("mode", "build") == "plan"
         worktree, branch, base = make_worktree(repo, env_id)
         marker = _git_marker(worktree)
-        argv, source, stdin_text = build_argv(spec, build_prompt(env, worktree, branch, plan),
+        # The worker starts with the repo's hand-over bundle instead of a pasted context.
+        handover = context.bundle(repo, cfg) if (cfg.get("dispatch") or {}).get("context", True) else ""
+        argv, source, stdin_text = build_argv(spec, build_prompt(env, worktree, branch, plan, handover),
                                               f"relay-{env_id}", run_dir, worktree, cfg)
         argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
         started = time.monotonic()
