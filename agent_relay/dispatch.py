@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, context, doorbell, envelope, gitsync, locks
+from . import advisor, config, context, doorbell, envelope, gitsync, locks
 from .context import redact
 from .store import Store
 
@@ -61,6 +61,29 @@ class DispatchError(RuntimeError):
     pass
 
 
+class Deferred(RuntimeError):
+    """runtime auto found no runtime with quota left: answer 'deferred' with the reset time."""
+
+
+RATE_LIMIT_RE = re.compile(r"rate[ _-]?limit(?:ed)?\b|\b429\b|usage limit|too many requests|limit reached"
+                           r"|quota (?:exceeded|exhausted)|resource_exhausted", re.I)
+TRANSIENT_RE = re.compile(r"timed? ?out|econnreset|connection (?:reset|refused|closed)|network|\b50[234]\b"
+                          r"|overloaded|temporarily unavailable|stream (?:error|disconnected)|斷線", re.I)
+
+
+def classify_failure(log_file: Path) -> str | None:
+    """'rate-limited' (switch runtime), 'transient' (resume in place) or None (a real failure)."""
+    try:
+        tail = log_file.read_text(encoding="utf-8", errors="replace")[-4000:]
+    except OSError:
+        return None
+    if RATE_LIMIT_RE.search(tail):
+        return "rate-limited"
+    if TRANSIENT_RE.search(tail):
+        return "transient"
+    return None
+
+
 # ---------------------------------------------------------------- contract
 
 
@@ -68,8 +91,8 @@ def validate_spec(spec: object) -> dict:
     """Check the envelope's "dispatch" object (SPEC section 7)."""
     if not isinstance(spec, dict):
         raise envelope.EnvelopeError("dispatch must be an object")
-    if spec.get("runtime") not in RUNTIMES:
-        raise envelope.EnvelopeError(f"dispatch.runtime must be one of {RUNTIMES}")
+    if spec.get("runtime") not in (*RUNTIMES, "auto"):
+        raise envelope.EnvelopeError(f"dispatch.runtime must be one of {RUNTIMES} or auto")
     if not isinstance(spec.get("repo"), str) or not spec["repo"].strip():
         raise envelope.EnvelopeError("dispatch.repo is required")
     if any(ch in spec["repo"] for ch in (chr(10), chr(13))):
@@ -344,28 +367,35 @@ def final_text(log_file: Path, limit: int = 4000) -> str:
     return text[-limit:]
 
 
-def changed_files(worktree: Path, base: str) -> list[str]:
-    """Repo-relative files the worker touched: committed since base, modified, or new."""
+# For git runs inside a worktree the worker could edit: no hooks, no fsmonitor,
+# raw (unquoted) path names so non-ASCII files compare as themselves.
+SAFE_GIT = ("-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false", "-c", "core.quotePath=false")
+
+
+def _names(out: str) -> list[str]:
+    return [name for name in out.split("\0") if name]
+
+
+def changed_files(worktree: Path, base: str) -> list[str] | None:
+    """Repo-relative files the worker touched (committed, modified, deleted, new), or None if unknown.
+
+    Renames are listed as a delete plus an add, so moving a file out of scope
+    cannot hide behind its new in-scope name.
+    """
     try:
-        committed = _git(worktree, "diff", "--name-only", base).splitlines()
-        status = _git(worktree, "status", "--porcelain", "--untracked-files=all").splitlines()
+        committed = _names(_git(worktree, *SAFE_GIT, "diff", "--name-only", "--no-renames", "-z", base))
+        tracked = _names(_git(worktree, *SAFE_GIT, "diff", "--name-only", "--no-renames", "-z", "HEAD"))
+        untracked = _names(_git(worktree, *SAFE_GIT, "ls-files", "--others", "--exclude-standard", "-z"))
     except DispatchError:
-        return []
-    files = {line.strip() for line in committed if line.strip()}
-    for line in status:
-        path = line[3:].strip().strip('"')
-        if " -> " in path:
-            path = path.split(" -> ", 1)[1]
-        if path:
-            files.add(path)
-    return sorted(files)
+        return None
+    return sorted(set(committed) | set(tracked) | set(untracked))
 
 
 def predict_conflicts(repo: Path, base: str, changed: list[str], store: Path, claim: dict) -> str:
     """Before anyone merges: which changed files the main line also moved, and who else holds them."""
     notes = []
     try:
-        moved = set(_git(repo, "diff", "--name-only", base, "HEAD").split())
+        moved = set(_names(_git(repo, *SAFE_GIT, "diff", "--name-only", "--no-renames", "-z", base, "HEAD")))
     except DispatchError:
         moved = set()
     both = sorted(moved & set(changed))
@@ -383,9 +413,9 @@ def predict_conflicts(repo: Path, base: str, changed: list[str], store: Path, cl
 
 def changes(worktree: Path, base: str) -> str:
     try:
-        commits = _git(worktree, "log", "--oneline", f"{base}..HEAD") or "(no commits)"
-        stat = _git(worktree, "diff", "--stat", base) or "(no diff)"
-        dirty = _git(worktree, "status", "--porcelain") or "(clean)"
+        commits = _git(worktree, *SAFE_GIT, "log", "--oneline", f"{base}..HEAD") or "(no commits)"
+        stat = _git(worktree, *SAFE_GIT, "diff", "--stat", base) or "(no diff)"
+        dirty = _git(worktree, *SAFE_GIT, "status", "--porcelain") or "(clean)"
     except DispatchError as exc:
         return f"(could not read worktree: {exc})"
     return f"commits:\n{commits}\n\ndiff --stat {base[:10]}:\n{stat}\n\nuncommitted:\n{dirty}"
@@ -461,6 +491,19 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         timeout_s = spec.get("timeout_minutes", DEFAULT_TIMEOUT_MIN) * 60
         write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
+        decision = None
+        if spec["runtime"] == "auto":
+            # Pick with this machine's quotas: it is this machine's accounts that will pay.
+            decision = advisor.decide(env["subject"], env["body"], spec.get("paths"), spec.get("mode", "build"),
+                                      advisor.snapshot(cfg), (cfg.get("dispatch") or {}).get("runtimes") or [])
+            if decision.runtime is None:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(decision.wait_until)) if decision.wait_until else "未知"
+                raise Deferred(f"所有允許的 runtime 額度都不足，最早 {when} 重置後再寄。" + "；".join(decision.reasons))
+            spec = {**spec, "runtime": decision.runtime}
+            if decision.model and not spec.get("model"):
+                spec["model"] = decision.model
+            if decision.effort and not spec.get("effort"):
+                spec["effort"] = decision.effort
         repo = policy_check(env, spec, cfg.get("dispatch") or {})
         plan = spec.get("mode", "build") == "plan"
         holder = f"relay:{env_id}"
@@ -485,21 +528,47 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 handover = context.bundle(repo, cfg, sessions=policy.get("context_sessions") is True)
             except Exception as exc:  # noqa: BLE001 - a broken note must not stop the run
                 doorbell._log(f"dispatch {env_id}: hand-over bundle skipped: {type(exc).__name__}: {exc}")
-        argv, source, stdin_text = build_argv(spec, build_prompt(env, worktree, branch, plan, handover),
-                                              f"relay-{env_id}", run_dir, worktree, cfg)
-        argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
+        prompt = build_prompt(env, worktree, branch, plan, handover)
         started = time.monotonic()
-        status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
-                           extra_env={"AGENT_RELAY_HOLDER": holder})
-        changed = changed_files(worktree, base)
+        attempts = []
+        retries = int(policy.get("retries", 1)) if isinstance(policy.get("retries", 1), int) else 1
+        fallbacks = list(decision.fallbacks) if decision else []
+        while True:
+            argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
+            argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
+            status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
+                               extra_env={"AGENT_RELAY_HOLDER": holder})
+            failure = classify_failure(run_dir / "output.log") if status == "failed" else None
+            attempts.append(f"{spec['runtime']}{'/' + spec['model'] if spec.get('model') else ''}：{status}"
+                            f"{'（' + failure + '）' if failure else ''}")
+            if not failure or len(attempts) > retries:
+                break
+            if failure == "rate-limited":
+                nxt = next((f for f in fallbacks if f["runtime"] != spec["runtime"]
+                            and f["runtime"] in ((cfg.get("dispatch") or {}).get("runtimes") or [])
+                            and (not plan and f["runtime"] in advisor.BUILD_OK or plan)), None)
+                if nxt is None:
+                    break
+                fallbacks.remove(nxt)
+                spec = {**spec, "runtime": nxt["runtime"], "model": nxt.get("model"), "effort": nxt.get("effort")}
+                spec = {k: v for k, v in spec.items() if v is not None}
+            else:
+                time.sleep(min(30, 5 * len(attempts)))  # transient: resume in place after a short wait
+        # Never run git in the worktree once the worker may have redirected its .git pointer.
+        tampered = _git_marker(worktree) != marker
+        found = None if tampered else changed_files(worktree, base)
+        changed = found or []
         scope_note, outside = "", []
         if claim:
-            outside = locks.out_of_scope(changed, claim["paths"])
+            # Unknown changes are treated as out of scope: no list, no commit.
+            outside = ["（.git 指標被改過，無法檢查）" if tampered else "（讀不到變更清單）"] if found is None \
+                else locks.out_of_scope(changed, claim["paths"])
             scope_note = predict_conflicts(repo, base, changed, Path(cfg["store"]), claim)
         if plan:
             commit = "plan mode: nothing to commit"
         elif outside:
-            commit = "skipped: 改到簽出範圍外的檔案，未 commit：" + ", ".join(outside[:20])
+            commit = ("skipped: 改到簽出範圍外的檔案，relay 沒有 commit（工人自己若有 commit 仍在分支上，勿合併）："
+                      + ", ".join(outside[:20]))
         else:
             commit = commit_work(worktree, env_id, marker)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
@@ -510,12 +579,18 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             f"worktree: {worktree}\nbranch: {branch}\nrelay commit: {commit}\n耗時: {report['seconds']} 秒\n"
             f"log（收件端機器）: {run_dir / 'output.log'}\n\n"
             f"## 工人最後回報\n{final_text(run_dir / 'output.log')}\n\n"
-            f"## 變更\n```text\n{changes(worktree, base)}\n```\n"
+            f"## 變更\n```text\n{'(worktree 的 .git 指標被工人改過，不在裡面跑 git)' if tampered else changes(worktree, base)}\n```\n"
             + (f"\n## 範圍與衝突預測\n簽出範圍：{', '.join(claim['paths'])}\n{scope_note}\n" if claim else "")
+            + (f"\n## 分派（runtime auto）\n" + "\n".join(f"- {r}" for r in decision.reasons) + "\n" if decision else "")
+            + ("\n## 嘗試\n" + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(attempts)) + "\n" if len(attempts) > 1 else "")
         )
+        report["attempts"] = attempts
         if outside:
             report["status"] = "out-of-scope"
             body = body.replace(f"status: {status}", "status: out-of-scope", 1)
+    except Deferred as exc:
+        report.update(status="deferred", error=str(exc))
+        body = f"status: deferred\n原因: {exc}\n"
     except (DispatchError, envelope.EnvelopeError, FileNotFoundError, PermissionError) as exc:
         report["error"] = str(exc)
         body = f"status: refused\n原因: {exc}\n"

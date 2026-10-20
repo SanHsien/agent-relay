@@ -52,8 +52,11 @@ class PatternTests(unittest.TestCase):
         self.assertFalse(locks.may_overlap("src/api/", "src/web/"))
 
     def test_validate_paths(self):
-        self.assertEqual(locks.validate_paths(["a\\b.py", "src/"]), ["a/b.py", "src/"])
-        for bad in ([], "calc.py", ["../x"], ["a/../../x"], ["C:/x"], ["a" + chr(10)], [""], ["x"] * 51):
+        self.assertEqual(locks.validate_paths(["a\\b.py", "src/", "./calc.py", "src//a.py"]),
+                         ["a/b.py", "src/", "calc.py", "src/a.py"])
+        self.assertTrue(locks.may_overlap(locks.validate_paths(["./calc.py"])[0], "calc.py"))
+        for bad in ([], "calc.py", ["../x"], ["a/../../x"], ["C:/x"], ["/etc/x"], ["a" + chr(10)], [""], ["./"],
+                    ["x"] * 51):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 locks.validate_paths(bad)
 
@@ -110,6 +113,31 @@ class ClaimTests(Base):
         for t in threads:
             t.join()
         self.assertEqual(sorted(results), ["blocked"] * 5 + ["won"])
+
+    def test_broken_claim_file_does_not_lock_the_repo(self):
+        claim = locks.checkout(self.store, self.repo, "relay:a", ["calc.py"], 600)
+        (self.store / "claims" / claim["key"] / "bad.json").write_text(
+            json.dumps({"schema": locks.CLAIM_SCHEMA, "id": "bad", "holder": "x", "paths": ["y"], "expires": None}),
+            encoding="utf-8")
+        locks.checkout(self.store, self.repo, "relay:b", ["other.py"], 600)
+        self.assertEqual([c["holder"] for c in locks.active_claims(self.store, claim["key"])], ["relay:a", "relay:b"])
+
+    def test_local_lock_owner_only_and_stale_break(self):
+        folder = self.dir / "lockdir"
+        with locks._LocalLock(folder) as first:
+            other = locks._LocalLock(folder)
+            other.__exit__(None, None, None)  # not its lock: must not remove it
+            self.assertTrue(first.path.exists())
+        self.assertFalse((folder / ".lock").exists())
+        (folder / ".lock").write_text("dead", encoding="ascii")
+        old = time.time() - locks.STALE_LOCK_S - 5
+        os.utime(folder / ".lock", (old, old))
+        with locks._LocalLock(folder):
+            pass
+
+    def test_default_holder_has_host(self):
+        with mock.patch.dict(os.environ, {"AGENT_RELAY_HOLDER": ""}):
+            self.assertRegex(locks.default_holder("cc"), r"^manual:cc@.+")
 
     def test_out_of_scope(self):
         self.assertEqual(locks.out_of_scope(["calc.py", "src/a.py", "x.md"], ["calc.py", "src/"]), ["x.md"])
@@ -190,6 +218,27 @@ class DispatchClaimTests(Base):
         events = [json.loads(p.read_text(encoding="utf-8"))["event"] for p in (self.store / "audit").rglob("*.json")]
         self.assertIn("checkout", events)
         self.assertIn("checkin", events)
+
+    def test_chinese_file_name_is_in_scope(self):
+        env = self.task(["文件.md"])
+        report = self.run_worker(env, "open('文件.md','w',encoding='utf-8').write('中文')")
+        self.assertEqual(report["status"], "ok", report.get("commit"))
+        self.assertTrue(report["commit"].startswith("committed:"))
+
+    def test_rename_out_of_scope_is_caught(self):
+        env = self.task(["inscope.py"])
+        code = ("import subprocess;"
+                "subprocess.run(['git','mv','other.py','inscope.py'], check=True)")
+        report = self.run_worker(env, code)
+        self.assertEqual(report["status"], "out-of-scope")
+        self.assertIn("other.py", report["commit"])
+
+    def test_unknown_changes_are_not_committed(self):
+        env = self.task(["calc.py"])
+        with mock.patch.object(dispatch, "changed_files", return_value=None):
+            report = self.run_worker(env, "open('calc.py','a').write('#')")
+        self.assertEqual(report["status"], "out-of-scope")
+        self.assertIn("讀不到變更清單", report["commit"])
 
     def test_require_paths_policy(self):
         self.cfg["dispatch"]["require_paths"] = True

@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import config, doorbell, envelope, gitsync, locks, poller
+from . import advisor, config, doorbell, envelope, gitsync, locks, poller
 from . import context as handover
 from . import dispatch as dispatcher
 from .store import Store, StoreError
@@ -76,8 +76,23 @@ def cmd_dispatch(args, cfg) -> int:
     return 0 if report["status"] == "ok" else 4
 
 
+def cmd_advise(args, cfg) -> int:
+    body = args.body or ""
+    if args.body_file:
+        body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
+    allowed = args.allow or (cfg.get("dispatch") or {}).get("runtimes") or None
+    decision = advisor.decide(args.subject, body, args.path, args.mode, advisor.snapshot(cfg), allowed)
+    if args.card:
+        print(advisor.handoff_card(decision, args.subject, body, args.path))
+        return 0
+    data = decision.as_dict()
+    route = f"{decision.runtime}/{decision.model or 'default'}/effort {decision.effort or 'default'}" if decision.runtime else "wait"
+    _out(args, data, f"{decision.complexity} → {route}\n" + "\n".join(f"- {r}" for r in decision.reasons))
+    return 0 if decision.runtime else 6
+
+
 def cmd_claim(args, cfg) -> int:
-    holder = args.holder or os.environ.get("AGENT_RELAY_HOLDER") or f"manual:{_agent(args, cfg)}"
+    holder = args.holder or locks.default_holder(_agent(args, cfg))
     if not args.no_sync:
         gitsync.pull(Path(cfg["store"]))
     try:
@@ -94,7 +109,12 @@ def cmd_release(args, cfg) -> int:
     store = Path(cfg["store"])
     for claim in locks.active_claims(store, locks.repo_key(locks.repo_id(Path(args.repo or ".")))):
         if claim["id"] == args.claim_id:
-            locks.release(store, claim, changed=args.changed or [])
+            me = args.holder or locks.default_holder(_agent(args, cfg))
+            if claim["holder"] != me and not args.force:
+                _out(args, {"error": "not your claim", "holder": claim["holder"]},
+                     f"{args.claim_id} belongs to {claim['holder']}; pass --force to release it anyway")
+                return 2
+            locks.release(store, claim, changed=args.changed or [], released_by=me)
             _sync(args, cfg, f"relay: release {claim['id']}")
             _out(args, {"released": claim["id"]}, f"released {claim['id']}")
             return 0
@@ -271,7 +291,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--project", help="receiver-side project folder (enables the handoff doorbell)")
     s.add_argument("--ref", action="append", help="related path or URL; repeatable")
     g = s.add_argument_group("dispatch (kind=task only): run this task in a fresh agent session")
-    g.add_argument("--run", choices=dispatcher.RUNTIMES, help="runtime the receiver should start")
+    g.add_argument("--run", choices=(*dispatcher.RUNTIMES, "auto"),
+                   help="runtime the receiver should start; auto = receiver picks by complexity and its quotas")
     g.add_argument("--repo", help="receiver-side git repo, or asr:<session>")
     g.add_argument("--mode", default="build", choices=dispatcher.MODES)
     g.add_argument("--model")
@@ -279,6 +300,16 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
     g.add_argument("--path", action="append", help="file pattern the worker may change (checked out); repeatable")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("advise", help="pick runtime/model for a task from its complexity and local quotas")
+    s.add_argument("--subject", required=True)
+    s.add_argument("--body", default="")
+    s.add_argument("--body-file")
+    s.add_argument("--path", action="append")
+    s.add_argument("--mode", default="build", choices=dispatcher.MODES)
+    s.add_argument("--allow", action="append", help="runtimes that may be picked (default: dispatch.runtimes)")
+    s.add_argument("--card", action="store_true", help="print the hand-over card instead")
+    s.set_defaults(func=cmd_advise)
 
     s = sub.add_parser("claim", help="check out file patterns of a repo before changing them")
     s.add_argument("--repo")
@@ -292,6 +323,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("claim_id")
     s.add_argument("--repo")
     s.add_argument("--changed", action="append", help="file actually changed; repeatable")
+    s.add_argument("--holder", help="who you are (default: AGENT_RELAY_HOLDER or manual:<agent>@<host>)")
+    s.add_argument("--agent")
+    s.add_argument("--force", action="store_true", help="release someone else's claim")
     s.set_defaults(func=cmd_release)
 
     s = sub.add_parser("claims", help="list active claims of a repo")

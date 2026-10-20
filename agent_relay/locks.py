@@ -93,10 +93,13 @@ def validate_paths(paths: object) -> list[str]:
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip() or any(ch in raw for ch in (chr(10), chr(13))):
             raise ValueError(f"bad path pattern: {raw!r}")
-        path = normalize(raw.strip())
-        if not path or path.startswith("../") or "/../" in f"/{path}/" or re.match(r"^[A-Za-z]:", path):
+        text = raw.strip().replace("\\", "/")
+        if text.startswith("/") or re.match(r"^[A-Za-z]:", text):
+            raise ValueError(f"path pattern must be repo-relative: {raw!r}")
+        parts = [p for p in text.split("/") if p not in ("", ".")]  # ./a and a//b mean a and a/b
+        if not parts or ".." in parts:
             raise ValueError(f"path pattern must stay inside the repo: {raw!r}")
-        out.append(path + ("/" if raw.rstrip().endswith(("/", "\\")) else ""))
+        out.append("/".join(parts) + ("/" if text.endswith("/") else ""))
     return out
 
 
@@ -172,12 +175,14 @@ def active_claims(store: Path, key: str, now: float | None = None) -> list[dict]
             continue
         try:
             claim = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if (isinstance(claim, dict) and claim.get("schema") == CLAIM_SCHEMA and claim.get("id") == path.stem
-                and isinstance(claim.get("paths"), list) and float(claim.get("expires", 0)) > now):
+            live = (isinstance(claim, dict) and claim.get("schema") == CLAIM_SCHEMA and claim.get("id") == path.stem
+                    and isinstance(claim.get("paths"), list) and all(isinstance(p, str) for p in claim["paths"])
+                    and float(claim.get("expires", 0)) > now)
+        except (OSError, ValueError, TypeError):
+            continue  # one broken claim (perhaps synced from another machine) must not lock the whole repo
+        if live:
             out.append(claim)
-    return sorted(out, key=lambda c: c.get("created", 0))
+    return sorted(out, key=lambda c: c.get("created", 0) if isinstance(c.get("created"), (int, float)) else 0)
 
 
 def conflicts(paths: list[str], claims: list[dict], holder: str) -> list[dict]:
@@ -207,10 +212,16 @@ def audit(store: Path, event: str, **fields) -> Path:
 
 
 class _LocalLock:
-    """O_EXCL lock file around check-then-write; a lock older than STALE_LOCK_S is broken."""
+    """O_EXCL lock file around check-then-write.
+
+    The file holds a random token; only its owner removes it. A lock older than
+    STALE_LOCK_S (its owner crashed) is broken by renaming it to a unique name
+    first, so two waiters cannot both break it and both win.
+    """
 
     def __init__(self, folder: Path):
         self.path = folder / ".lock"
+        self.token = secrets.token_hex(8)
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,22 +229,29 @@ class _LocalLock:
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                with os.fdopen(fd, "w", encoding="ascii") as fh:
+                    fh.write(self.token)
                 return self
             except FileExistsError:
-                try:
-                    if time.time() - self.path.stat().st_mtime > STALE_LOCK_S:
-                        self.path.unlink()
-                        continue
-                except OSError:
-                    continue
-                if time.monotonic() > deadline:
-                    raise TimeoutError(f"could not lock {self.path}")
-                time.sleep(0.05)
+                self._break_if_stale()
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"could not lock {self.path}")
+            time.sleep(0.05)
+
+    def _break_if_stale(self) -> None:
+        try:
+            if time.time() - self.path.stat().st_mtime <= STALE_LOCK_S:
+                return
+            grave = self.path.with_name(f".lock.stale-{self.token}")
+            os.replace(self.path, grave)  # only one waiter's rename finds the stale file
+            grave.unlink()
+        except OSError:
+            pass
 
     def __exit__(self, *exc):
         try:
-            self.path.unlink()
+            if self.path.read_text(encoding="ascii") == self.token:
+                self.path.unlink()
         except OSError:
             pass
 
@@ -255,8 +273,16 @@ def checkout(store: Path, repo: Path, holder: str, paths: list[str], ttl_s: floa
                  "holder": holder, "paths": paths, "host": socket.gethostname(), "created": now,
                  "created_at": _iso(now), "expires": now + ttl_s, "expires_at": _iso(now + ttl_s), **extra}
         _write_json(claims_dir(store, key) / f"{claim['id']}.json", claim)
-    audit(store, "checkout", claim=claim["id"], repo=rid, holder=holder, paths=paths, **extra)
+    try:
+        audit(store, "checkout", claim=claim["id"], repo=rid, holder=holder, paths=paths, **extra)
+    except OSError:
+        pass  # the claim stands; a missing audit line must not strand it until its TTL
     return claim
+
+
+def default_holder(agent: str) -> str:
+    """Who an interactive session is when AGENT_RELAY_HOLDER is unset (same rule as checkout-guard)."""
+    return os.environ.get("AGENT_RELAY_HOLDER") or f"manual:{agent}@{socket.gethostname().lower()}"
 
 
 def release(store: Path, claim: dict, changed: list[str] | None = None, **extra) -> None:

@@ -211,12 +211,13 @@ git 狀態                                  分支、已追蹤但未提交的檔
 ```
 
 - **repo 身分**：`origin` 的 URL（去掉帳密、統一成 https、去掉 `.git`、小寫）；沒有 remote 就用本機 git 目錄。同一個 repo 的 worktree 身分相同。`<repo key>` = 名稱 slug + 身分的 SHA-1 前 12 碼。
-- **路徑規則**：repo 相對路徑，`**` 跨層，結尾 `/` 代表整個資料夾；比對不分大小寫。不可用 `..` 或磁碟機代號跳出 repo。兩個 claim 是否重疊，沿用 [claude-code-projects-workflow](https://github.com/SanHsien/claude-code-projects-workflow) 的 `may_overlap` 保守判斷：可能碰到同一個（即使還不存在的）檔案就算重疊。
+- **路徑規則**：repo 相對路徑，`**` 跨層，結尾 `/` 代表整個資料夾；比對不分大小寫。`./a`、`a//b` 會正規化成 `a`、`a/b`；不可用 `..`、開頭的 `/` 或磁碟機代號跳出 repo。兩個 claim 是否重疊，沿用 [claude-code-projects-workflow](https://github.com/SanHsien/claude-code-projects-workflow) 的 `may_overlap` 保守判斷：可能碰到同一個（即使還不存在的）檔案就算重疊。
 - **簽出**：本機以 `claims/<key>/.lock`（O_EXCL）把「檢查＋寫入」包成一步，同機器上不會兩個都成功。跨機器靠 git 同步，對方 pull 後才看得到；兩台機器在同一輪同時簽出時，可能都成功，這時衝突預測（下面）會在回信裡點出來。
 - **派工**：task 信的 `dispatch.paths` 就是工人可以改的檔案範圍。relay 在開 worktree 前簽出（holder = `relay:<信件 id>`，期限 = 逾時 + 10 分鐘），重疊就回 `status: refused`，原因寫明誰持有哪些檔案、到何時。收件端可設 `dispatch.require_paths: true` 要求每封派工都要寫範圍。
 - **施工後**：
-  - 工人改到範圍外的檔案 → 不 commit，回 `status: out-of-scope` 並列出那些檔案。
+  - 工人改到範圍外的檔案 → relay 不 commit，回 `status: out-of-scope` 並列出那些檔案。變更清單用 `--no-renames -z` 與 `core.quotePath=false` 取得：中文檔名照原樣比對；搬檔算「刪舊檔＋加新檔」，把範圍外的檔搬進範圍內也會被抓到。讀不到變更清單、或工人改過 worktree 的 `.git` 指標時，一律當成範圍外，不 commit。worktree 內的 git 一律關掉 hooks 與 fsmonitor。
   - **衝突預測**：列出「主線自 base 起也改過」的檔案，以及「目前被別人簽出」的檔案，合併前先處理。
   - 不論結果都簽入（刪除 claim），打卡紀錄寫下實際改了哪些檔案。
-- **互動 session**：[harness-guard](https://github.com/SanHsien/harness-guard) 的 `checkout-guard`（PreToolUse：Edit、Write、MultiEdit、NotebookEdit）讀本機 store 的 claim；要改的檔案被別人簽出就擋下（exit 2，說明持有者）。「我」= `AGENT_RELAY_HOLDER`（relay 會替它開的工人設好），否則 `manual:<config 的 agent>`，與 `relay claim` 的預設一致。
-- **手動簽出**：`relay claim --repo . --path calc.py --ttl 60`、`relay claims --repo .`、`relay release <claim id> --changed calc.py`。
+- **互動 session**：[harness-guard](https://github.com/SanHsien/harness-guard) 的 `checkout-guard`（PreToolUse：Edit、Write、MultiEdit、NotebookEdit）讀本機 store 的 claim；要改的檔案被別人簽出就擋下（exit 2，說明持有者）。「我」= `AGENT_RELAY_HOLDER`（relay 會替它開的工人設好），否則 `manual:<config 的 agent>@<主機名>`，與 `relay claim` 的預設一致。hook 找 store 的規則與 CLI 相同（config.json，再被 `AGENT_RELAY_STORE`／`AGENT_RELAY_AGENT` 覆蓋，預設 `<home>/store`）。壞掉或缺 schema 的 claim 檔會被略過，不會讓 hook 整個失效。
+- **已知限制**：同一台機器上的兩個互動 session 身分相同（都是 `manual:<agent>@<主機>`），彼此不會互擋；要互擋就各自設不同的 `AGENT_RELAY_HOLDER`。checkout-guard 不攔 Bash 寫檔。
+- **手動簽出**：`relay claim --repo . --path calc.py --ttl 60`、`relay claims --repo .`、`relay release <claim id> --changed calc.py`（只能釋放自己的 claim，別人的要加 `--force`，打卡紀錄會記下是誰釋放的）。
