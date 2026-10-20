@@ -180,7 +180,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - prompt 寫進 `runs/<id>/prompt.md`，命令列只放「讀這個檔」的短指令。
   - 回信附 `--usage-file` 的用量（模型、tokens、api_calls、估計費用）。
   - Hermes 沒有 shell，跟 claude 工人一樣不能自己跑測試，驗證交給驗收閘門。
-- **codex 沙箱釘住 worktree**：使用者的 `~/.codex/config.toml` 可能用 `sandbox_workspace_write.writable_roots`（或 `%TEMP%`）把 workspace-write 撐大；實測曾因此讓工人寫進主 repo 的 `.git/hooks`。relay 每次都加 `-c sandbox_workspace_write.writable_roots=[]`、`exclude_tmpdir_env_var=true`、`exclude_slash_tmp=true`。每次嘗試的實際指令（不含 prompt）寫在 `runs/<id>/argv.json` 與回信的「指令」行。
+- **codex 沙箱釘住 worktree**：使用者的 `~/.codex/config.toml` 可能用 `sandbox_workspace_write.writable_roots`（或 `%TEMP%`）把 workspace-write 撐大；實測曾因此讓工人寫進主 repo 的 `.git/hooks`。relay 每次都加 `-c sandbox_workspace_write.writable_roots=[]`、`exclude_tmpdir_env_var=true`、`exclude_slash_tmp=true`。每次嘗試的實際指令（不含 prompt）寫在 `runs/<id>/argv.json`（重試時前一次留成 `argv.N.json`）與回信的「指令」行。另加 `network_access=false`。前提：Windows 上的檔案寫入隔離由 codex 的 Windows 沙箱執行，實測環境是 `~/.codex/config.toml` 的 `[windows] sandbox = "elevated"`；其他收件機請先用一張含反例的工單確認它真的擋得住。
 - codex 經 OpenCodex 代理時注意：直接跑 `codex.exe` 會跳過 `codex.CMD` 外殼裡的 `ocx.exe ensure`。代理沒在跑，工人就會失敗（回信 `failed`），先確認代理常駐。
 
 **門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`（用有主控台的 `python.exe`，relay 的 home 與 store 用參數傳，不靠環境變數），你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。

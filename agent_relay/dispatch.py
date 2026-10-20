@@ -303,7 +303,8 @@ def _cortex_launcher(cfg: dict):
 # writes its worktree and nothing else, whatever that file says.
 CODEX_SANDBOX_PINS = ["-c", "sandbox_workspace_write.writable_roots=[]",
                       "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true",
-                      "-c", "sandbox_workspace_write.exclude_slash_tmp=true"]
+                      "-c", "sandbox_workspace_write.exclude_slash_tmp=true",
+                      "-c", "sandbox_workspace_write.network_access=false"]  # unit tests need no network
 
 
 def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: Path,
@@ -854,6 +855,8 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                         _sync(cfg, f"relay: extend {claim['id']}")  # other machines must see the new expiry
                 if attempts:  # keep the previous attempt's evidence
                     shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
+                    if (run_dir / "argv.json").is_file():
+                        shutil.copyfile(run_dir / "argv.json", run_dir / f"argv.{len(attempts)}.json")
                 argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
                 argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
                 # The exact command (prompt left out): the reply's proof of which sandbox the worker had.
