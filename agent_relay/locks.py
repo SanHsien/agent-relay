@@ -290,6 +290,14 @@ def default_holder(agent: str) -> str:
     return os.environ.get("AGENT_RELAY_HOLDER") or f"manual:{agent}@{socket.gethostname().lower()}"
 
 
+def extend(store: Path, claim: dict, ttl_s: float) -> dict:
+    """Push a live claim's expiry out (a retry or a long gate must not let it lapse)."""
+    now = _now()
+    claim = {**claim, "expires": now + ttl_s, "expires_at": _iso(now + ttl_s)}
+    _write_json(claims_dir(store, claim["key"]) / f"{claim['id']}.json", claim)
+    return claim
+
+
 def release(store: Path, claim: dict, changed: list[str] | None = None, **extra) -> None:
     path = claims_dir(store, claim["key"]) / f"{claim['id']}.json"
     try:

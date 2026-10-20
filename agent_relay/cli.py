@@ -62,6 +62,8 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
     spec = {"runtime": args.run, "repo": args.repo, "mode": args.mode, "timeout_minutes": args.timeout}
     if args.path:
         spec["paths"] = args.path
+    if args.tdd:
+        spec["tdd"] = True
     if args.model:
         spec["model"] = args.model
     if args.effort:
@@ -299,6 +301,7 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--effort")
     g.add_argument("--timeout", type=int, default=dispatcher.DEFAULT_TIMEOUT_MIN, help="minutes")
     g.add_argument("--path", action="append", help="file pattern the worker may change (checked out); repeatable")
+    g.add_argument("--tdd", action="store_true", help="require a test that fails before the change (red) and passes after")
     s.set_defaults(func=cmd_send)
 
     s = sub.add_parser("advise", help="pick runtime/model for a task from its complexity and local quotas")

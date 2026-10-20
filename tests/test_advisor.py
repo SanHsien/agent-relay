@@ -221,3 +221,129 @@ class FailureClassTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixTests(DispatchAutoTests):
+    """Regression tests for the T-20261018-16 review."""
+
+    def test_reaper_skips_a_live_process(self):
+        env = self.send("加 power 函式")
+        self.store.read("cc", env["id"])
+        dispatch.write_state(env["id"], phase="running", pid=os.getpid(), started=0, deadline=1)  # me: alive
+        self.assertEqual(dispatch.reap_interrupted("cc", self.cfg), [])
+        dispatch.write_state(env["id"], phase="running", pid=999999999, started=0, deadline=1)
+        self.assertEqual(dispatch.reap_interrupted("cc", self.cfg), [env["id"]])
+
+    def test_each_attempt_refreshes_the_lease(self):
+        env = self.send("加 power 函式")
+        deadlines = []
+        real = dispatch.write_state
+
+        def spy(env_id, **fields):
+            if fields.get("phase") == "running":
+                deadlines.append(fields["deadline"])
+            return real(env_id, **fields)
+
+        with mock.patch.object(dispatch, "write_state", side_effect=spy):
+            self.run_with(env, FREE, ["print('ECONNRESET'); raise SystemExit(1)", "pass"])
+        self.assertGreaterEqual(len(deadlines), 3)  # start, each of 2 attempts, before gates
+        self.assertEqual(deadlines, sorted(deadlines))
+
+    def test_previous_attempt_log_kept(self):
+        env = self.send("加 power 函式")
+        self.run_with(env, FREE, ["print('ECONNRESET'); raise SystemExit(1)", "pass"])
+        logs = list(Path(os.environ["AGENT_RELAY_HOME"], "runs", env["id"]).glob("output.*.log"))
+        self.assertEqual([p.name for p in logs], ["output.1.log"])
+
+    def test_worker_output_is_not_a_rate_limit(self):
+        env = self.send("加 power 函式")
+        code = ("import json; print(json.dumps({'type':'assistant','message':'edited rate_limiter.py; HTTP 429 handled'}));"
+                "print(json.dumps({'type':'result','is_error':False,'result':'2 tests failed at line 503'}));"
+                "raise SystemExit(1)")
+        report, seen = self.run_with(env, FREE, [code])
+        self.assertEqual((len(seen), report["status"]), (1, "failed"))
+
+    def test_runtime_error_event_is_a_rate_limit(self):
+        env = self.send("重構鎖的競態")
+        code = ("import json; print(json.dumps({'type':'result','is_error':True,'api_error_status':429,"
+                "'result':'API Error: rate limit exceeded'})); raise SystemExit(1)")
+        report, seen = self.run_with(env, FREE, [code, "pass"])
+        self.assertEqual([s[0] for s in seen], ["claude", "codex"])
+
+    def test_no_back_and_forth_between_limited_runtimes(self):
+        self.cfg["dispatch"]["retries"] = 3
+        env = self.send("重構鎖的競態")
+        limited = "print('429 Too Many Requests'); raise SystemExit(1)"
+        report, seen = self.run_with(env, FREE, [limited, limited, "pass"])
+        self.assertEqual([s[0] for s in seen], ["claude", "codex"])  # claude/sonnet is not tried after claude was limited
+
+    def test_retries_clamped(self):
+        for raw, want in ((True, 2), (1000, 4), (-5, 1), ("x", 2)):
+            self.cfg["dispatch"]["retries"] = raw
+            env = self.send("加 power 函式")
+            transient = "print('ECONNRESET'); raise SystemExit(1)"
+            report, seen = self.run_with(env, FREE, [transient] * 5)
+            self.assertEqual(len(seen), want, raw)
+
+    def test_auto_with_model_rejected(self):
+        with self.assertRaises(envelope.EnvelopeError):
+            envelope.build(sender="a", to="b", subject="x", body="", kind="task",
+                           dispatch={"runtime": "auto", "repo": "x", "model": "opus"})
+
+    def test_unauthorised_sender_refused_before_quotas(self):
+        self.cfg["dispatch"]["senders"] = ["someone-else"]
+        env = self.send("重構")
+        with mock.patch.object(advisor, "snapshot") as snap:
+            report, _ = self.run_with(env, {}, [])
+        snap.assert_not_called()
+        self.assertEqual(report["status"], "refused")
+
+    def test_no_usable_runtime_is_refused_not_deferred(self):
+        self.cfg["dispatch"]["runtimes"] = ["agy"]  # agy cannot build
+        env = self.send("加 power 函式")
+        report, _ = self.run_with(env, FREE, [])
+        self.assertEqual(report["status"], "refused")
+
+
+class QuotaRobustnessTests(unittest.TestCase):
+    def test_malformed_files_are_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.json"
+            for content in ("[1,2]", '"str"', '{"rate_limits":{"five_hour":50}}', '{"rate_limits":[]}'):
+                path.write_text(content, encoding="utf-8")
+                q = advisor.claude_quota(path)
+                self.assertIsNone(q.five_hour, content)
+        for out in ("[]", '"x"', "null", '{"usage":{"primary_window":5}}'):
+            with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=out)):
+                self.assertIsNone(advisor.codex_quota(["c"]).five_hour, out)
+
+    def test_read_failure_noted(self):
+        quotas = {**FREE, "codex": Quota("codex", source="讀取失敗")}
+        d = advisor.decide("重構鎖的競態", "", None, "build", {**quotas, "claude": Quota("claude", 99, 1)}, ALL)
+        self.assertTrue(any("codex 額度讀取失敗" in r for r in d.reasons))
+
+    def test_codex_passed_reset_is_empty(self):
+        out = json.dumps({"usage": {"primary_window": {"used_percent": 95, "reset_at": 1.0}}})
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=out)):
+            q = advisor.codex_quota(["c"])
+        self.assertEqual(q.five_hour, 0.0)
+        self.assertFalse(q.blocked())
+
+    def test_quoted_windows_command(self):
+        cfg = {"advisor": {"codex_quota_command": r'"C:\Program Files\nodejs\node.exe" checker.js'}}
+        with mock.patch.object(advisor, "codex_quota", return_value=Quota("codex")) as cq, \
+                mock.patch.object(advisor, "claude_quota", return_value=Quota("claude")):
+            advisor.snapshot(cfg)
+        self.assertEqual(cq.call_args.args[0], [r"C:\Program Files\nodejs\node.exe", "checker.js"])
+
+
+class KeywordTests(unittest.TestCase):
+    def test_false_positives_gone(self):
+        for subject, body, want in (("Add Redis cache layer", "see docs/design.md", "medium"),
+                                    ("Update information page", "", "medium"),
+                                    ("Fix stack trace output", "", "medium"),
+                                    ("改這個文件裡的 bug", "", "medium"),
+                                    ("Debug deadlock in format parser", "", "high"),
+                                    ("Fix typo in README", "", "low"),
+                                    ("Refactor `rename_all()` in utils/rename.py", "", "high")):
+            self.assertEqual(advisor.complexity(subject, body)[0], want, subject)

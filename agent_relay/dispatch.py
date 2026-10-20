@@ -35,7 +35,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import advisor, config, context, doorbell, envelope, gitsync, locks
+from . import advisor, config, context, doorbell, envelope, gates, gitsync, locks
 from .context import redact
 from .store import Store
 
@@ -65,21 +65,54 @@ class Deferred(RuntimeError):
     """runtime auto found no runtime with quota left: answer 'deferred' with the reset time."""
 
 
-RATE_LIMIT_RE = re.compile(r"rate[ _-]?limit(?:ed)?\b|\b429\b|usage limit|too many requests|limit reached"
-                           r"|quota (?:exceeded|exhausted)|resource_exhausted", re.I)
-TRANSIENT_RE = re.compile(r"timed? ?out|econnreset|connection (?:reset|refused|closed)|network|\b50[234]\b"
-                          r"|overloaded|temporarily unavailable|stream (?:error|disconnected)|斷線", re.I)
+RATE_LIMIT_RE = re.compile(r"rate[ _-]?limit(?:ed)?\b(?!\w*\.py)|\b429\b|usage limit|too many requests"
+                           r"|limit reached|quota (?:exceeded|exhausted)|resource_exhausted", re.I)
+TRANSIENT_RE = re.compile(r"econnreset|etimedout|econnrefused|connection (?:reset|refused|closed|error)"
+                          r"|(?:http|status|code)\W{0,3}50[234]\b|bad gateway|service unavailable|gateway time-?out"
+                          r"|overloaded|temporarily unavailable|stream (?:error|disconnected)|request timed out", re.I)
+ERROR_EVENT_TYPES = {"error", "turn.failed", "stream_error", "api_error"}
+
+
+def failure_text(log_file: Path) -> str:
+    """Only what the runtime itself reported as an error, never the worker's own output.
+
+    claude / codex write JSON event lines: take error events (is_error results,
+    api_error_status, codex error / turn.failed). Plain lines are the CLI's own
+    stderr; keep the last few. Tool output and the worker's report are skipped,
+    so a test named test_network or a file rate_limiter.py cannot trigger a retry.
+    """
+    try:
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    picked, plain = [], []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            if stripped:
+                plain.append(stripped)
+            continue
+        try:
+            event = json.loads(stripped)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") in ERROR_EVENT_TYPES or (event.get("type") == "result" and event.get("is_error")):
+            for key in ("api_error_status", "error", "message", "subtype"):
+                if event.get(key):
+                    picked.append(str(event[key]))
+            if event.get("type") == "result" and event.get("is_error") and isinstance(event.get("result"), str):
+                picked.append(event["result"][:500])  # the CLI's own error summary
+    return "\n".join(picked + plain[-8:])
 
 
 def classify_failure(log_file: Path) -> str | None:
     """'rate-limited' (switch runtime), 'transient' (resume in place) or None (a real failure)."""
-    try:
-        tail = log_file.read_text(encoding="utf-8", errors="replace")[-4000:]
-    except OSError:
-        return None
-    if RATE_LIMIT_RE.search(tail):
+    text = failure_text(log_file)
+    if RATE_LIMIT_RE.search(text):
         return "rate-limited"
-    if TRANSIENT_RE.search(tail):
+    if TRANSIENT_RE.search(text):
         return "transient"
     return None
 
@@ -93,6 +126,9 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError("dispatch must be an object")
     if spec.get("runtime") not in (*RUNTIMES, "auto"):
         raise envelope.EnvelopeError(f"dispatch.runtime must be one of {RUNTIMES} or auto")
+    if spec["runtime"] == "auto" and ("model" in spec or "effort" in spec):
+        # model and effort ids belong to one runtime; with auto the receiver picks both.
+        raise envelope.EnvelopeError("dispatch.runtime auto cannot be combined with model or effort")
     if not isinstance(spec.get("repo"), str) or not spec["repo"].strip():
         raise envelope.EnvelopeError("dispatch.repo is required")
     if any(ch in spec["repo"] for ch in (chr(10), chr(13))):
@@ -106,6 +142,8 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError("dispatch.model must look like a model id")
     if "effort" in spec and spec["effort"] not in EFFORTS:
         raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
+    if "tdd" in spec and not isinstance(spec["tdd"], bool):
+        raise envelope.EnvelopeError("dispatch.tdd must be true or false")
     if "paths" in spec:
         try:
             spec["paths"] = locks.validate_paths(spec["paths"])
@@ -115,14 +153,22 @@ def validate_spec(spec: object) -> dict:
 
 
 def policy_check(env: dict, spec: dict, policy: dict) -> Path:
-    """Return the resolved repo, or raise when the receiver has not allowed this."""
+    """Return the resolved repo, or raise when the receiver has not allowed this.
+
+    Runs before anything else, `runtime: auto` included: an unauthorised sender gets
+    'refused', never a look at this machine's quotas.
+    """
     senders = policy.get("senders")
     if senders is not None and env["from"] not in senders:
         raise DispatchError(f"sender {env['from']!r} not in dispatch.senders {senders}")
     if policy.get("require_paths") and not spec.get("paths"):
         raise DispatchError("this machine requires dispatch.paths (the files the worker may change)")
     allowed = policy.get("runtimes") or []
-    if spec["runtime"] not in allowed:
+    if spec["runtime"] == "auto":
+        usable = advisor.PLAN_OK if spec.get("mode", "build") == "plan" else advisor.BUILD_OK
+        if not set(allowed) & usable:
+            raise DispatchError(f"runtime auto: none of dispatch.runtimes {allowed} can run a {spec.get('mode', 'build')} task")
+    elif spec["runtime"] not in allowed:
         raise DispatchError(f"runtime {spec['runtime']!r} not in this machine's dispatch.runtimes {allowed}")
     repo = doorbell.resolve_project(spec["repo"])
     if not doorbell._inside(repo, policy.get("repo_roots") or []):
@@ -411,6 +457,15 @@ def predict_conflicts(repo: Path, base: str, changed: list[str], store: Path, cl
     return "\n".join(notes)
 
 
+def gate_section(gate: "gates.GateResult") -> str:
+    lines = [f"\n## 驗收閘門：{gate.status}"] + [f"- {n}" for n in gate.notes]
+    for run_log in gate.logs:
+        lines.append(f"\n### {run_log['phase']}：`{run_log['command']}` → exit {run_log['exit']}（{run_log['seconds']} 秒）")
+        lines.append(f"log：{run_log['log']}\nsha256：{run_log['sha256']}")
+        lines.append("```text\n" + run_log["tail"] + "\n```")
+    return "\n".join(lines) + "\n"
+
+
 def changes(worktree: Path, base: str) -> str:
     try:
         commits = _git(worktree, *SAFE_GIT, "log", "--oneline", f"{base}..HEAD") or "(no commits)"
@@ -492,19 +547,19 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
         decision = None
+        repo = policy_check(env, spec, cfg.get("dispatch") or {})  # first: who may ask, which repo
         if spec["runtime"] == "auto":
             # Pick with this machine's quotas: it is this machine's accounts that will pay.
             decision = advisor.decide(env["subject"], env["body"], spec.get("paths"), spec.get("mode", "build"),
                                       advisor.snapshot(cfg), (cfg.get("dispatch") or {}).get("runtimes") or [])
             if decision.runtime is None:
                 when = time.strftime("%Y-%m-%d %H:%M", time.localtime(decision.wait_until)) if decision.wait_until else "未知"
-                raise Deferred(f"所有允許的 runtime 額度都不足，最早 {when} 重置後再寄。" + "；".join(decision.reasons))
+                raise Deferred(f"所有允許的 runtime 額度都不足，最早 {when} 重置後再寄。")
             spec = {**spec, "runtime": decision.runtime}
-            if decision.model and not spec.get("model"):
+            if decision.model:
                 spec["model"] = decision.model
-            if decision.effort and not spec.get("effort"):
+            if decision.effort:
                 spec["effort"] = decision.effort
-        repo = policy_check(env, spec, cfg.get("dispatch") or {})
         plan = spec.get("mode", "build") == "plan"
         holder = f"relay:{env_id}"
         if spec.get("paths") and not plan:
@@ -531,9 +586,18 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         prompt = build_prompt(env, worktree, branch, plan, handover)
         started = time.monotonic()
         attempts = []
-        retries = int(policy.get("retries", 1)) if isinstance(policy.get("retries", 1), int) else 1
+        raw_retries = policy.get("retries", 1)
+        retries = max(0, min(3, raw_retries)) if isinstance(raw_retries, int) and not isinstance(raw_retries, bool) else 1
         fallbacks = list(decision.fallbacks) if decision else []
+        limited: set[str] = set()
         while True:
+            # Every attempt gets a fresh lease and claim: a retry must never look abandoned.
+            write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
+                        deadline=time.time() + timeout_s + LEASE_GRACE_S)
+            if claim:
+                claim = locks.extend(Path(cfg["store"]), claim, timeout_s + LEASE_GRACE_S)
+            if attempts:  # keep the previous attempt's evidence
+                shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
             argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
             argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
             status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
@@ -544,9 +608,10 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             if not failure or len(attempts) > retries:
                 break
             if failure == "rate-limited":
-                nxt = next((f for f in fallbacks if f["runtime"] != spec["runtime"]
+                limited.add(spec["runtime"])
+                nxt = next((f for f in fallbacks if f["runtime"] not in limited
                             and f["runtime"] in ((cfg.get("dispatch") or {}).get("runtimes") or [])
-                            and (not plan and f["runtime"] in advisor.BUILD_OK or plan)), None)
+                            and (plan or f["runtime"] in advisor.BUILD_OK)), None)
                 if nxt is None:
                     break
                 fallbacks.remove(nxt)
@@ -554,6 +619,12 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 spec = {k: v for k, v in spec.items() if v is not None}
             else:
                 time.sleep(min(30, 5 * len(attempts)))  # transient: resume in place after a short wait
+        # The gates may take a while too: extend the lease and claim once more before them.
+        gate_window = int(((policy.get("verify") or {}).get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN))) * 120
+        write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
+                    deadline=time.time() + gate_window + LEASE_GRACE_S)
+        if claim:
+            claim = locks.extend(Path(cfg["store"]), claim, gate_window + LEASE_GRACE_S)
         # Never run git in the worktree once the worker may have redirected its .git pointer.
         tampered = _git_marker(worktree) != marker
         found = None if tampered else changed_files(worktree, base)
@@ -564,11 +635,27 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             outside = ["（.git 指標被改過，無法檢查）" if tampered else "（讀不到變更清單）"] if found is None \
                 else locks.out_of_scope(changed, claim["paths"])
             scope_note = predict_conflicts(repo, base, changed, Path(cfg["store"]), claim)
+        gate = None
+        if not plan and not outside and status == "ok":
+            # Acceptance gates on the receiver's own terms: no stubs, a proven red test, a real green run.
+            gate = gates.check(repo, worktree, base, changed, run_dir, policy.get("verify") or {},
+                               want_tdd=spec.get("tdd") is True)
+            if gate.status == "skipped" and (policy.get("require_verification") or spec.get("tdd") is True):
+                gate.status = "unverified"
+                gate.notes.append("這台機器要求驗收（或信件要求 TDD），但沒有設定驗收閘門")
+            try:
+                locks.audit(Path(cfg["store"]), "verify", claim=(claim or {}).get("id", "none"), env=env_id,
+                            status=gate.status, runs=[{k: r[k] for k in ("phase", "command", "exit", "sha256")}
+                                                      for r in gate.logs])
+            except OSError:
+                pass
         if plan:
             commit = "plan mode: nothing to commit"
         elif outside:
             commit = ("skipped: 改到簽出範圍外的檔案，relay 沒有 commit（工人自己若有 commit 仍在分支上，勿合併）："
                       + ", ".join(outside[:20]))
+        elif gate and not gate.passed:
+            commit = f"skipped: 驗收閘門沒過（{gate.status}），relay 沒有 commit"
         else:
             commit = commit_work(worktree, env_id, marker)
         report.update(status=status, exit_code=code, runtime=spec["runtime"], builder=source, commit=commit,
@@ -583,11 +670,17 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             + (f"\n## 範圍與衝突預測\n簽出範圍：{', '.join(claim['paths'])}\n{scope_note}\n" if claim else "")
             + (f"\n## 分派（runtime auto）\n" + "\n".join(f"- {r}" for r in decision.reasons) + "\n" if decision else "")
             + ("\n## 嘗試\n" + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(attempts)) + "\n" if len(attempts) > 1 else "")
+            + (gate_section(gate) if gate else "")
         )
         report["attempts"] = attempts
         if outside:
             report["status"] = "out-of-scope"
             body = body.replace(f"status: {status}", "status: out-of-scope", 1)
+        elif gate and not gate.passed:
+            report["status"] = gate.status
+            body = body.replace(f"status: {status}", f"status: {gate.status}", 1)
+        if gate:
+            report["gate"] = {"status": gate.status, "logs": [{k: r[k] for k in ("phase", "exit", "sha256")} for r in gate.logs]}
     except Deferred as exc:
         report.update(status="deferred", error=str(exc))
         body = f"status: deferred\n原因: {exc}\n"
@@ -607,6 +700,29 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
     if sync:
         _sync(cfg, f"relay: {agent} dispatch {env_id} -> {report['status']}")
     return report
+
+
+def pid_alive(pid) -> bool:
+    """Is that dispatch process still running? Never signals it (os.kill on Windows would end it)."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
 
 
 def _never_started(env: dict, cfg: dict, rung: set[str], now: float) -> bool:
@@ -638,6 +754,8 @@ def reap_interrupted(agent: str, cfg: dict, now: float | None = None, rung: list
                 lease = read_state(env["id"])
                 if not lease or lease.get("phase") != "running" or now < float(lease.get("deadline")):
                     continue
+                if pid_alive(lease.get("pid")):
+                    continue  # still running (a long gate, a slow retry): not interrupted
                 started = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(lease.get("started", 0))))
                 body = (f"status: interrupted\n派工在 {started} 開始，超過期限仍未回報（分頁被關、當機或重開機）。"
                         "worktree 若已建立會保留在原處。\n")

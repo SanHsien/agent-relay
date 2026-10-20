@@ -28,10 +28,16 @@ from pathlib import Path
 FIVE_HOUR_LIMIT = 90.0
 WEEKLY_LIMIT = 95.0
 
-HIGH_WORDS = ("debug", "root cause", "race", "deadlock", "security", "architecture", "refactor", "migrate",
-              "concurren", "設計", "架構", "重構", "除錯", "根因", "安全", "競態", "遷移", "效能")
-LOW_WORDS = ("rename", "typo", "format", "lint", "comment", "docs", "readme", "bump", "changelog",
-             "改名", "錯字", "格式", "註解", "文件", "說明", "排版", "批次")
+# English words match on word boundaries; Chinese terms are specific enough to match as text.
+HIGH_EN = ("debug", "debugging", "root cause", "race condition", "data race", "deadlock", "security", "vulnerability",
+           "architecture", "refactor", "refactoring", "migrate", "migration", "concurrency", "concurrent")
+HIGH_ZH = ("架構", "重構", "除錯", "根因", "資安", "競態", "死結", "遷移", "效能瓶頸")
+LOW_EN = ("rename", "typo", "typos", "reformat", "formatting", "lint", "comment", "comments", "readme", "bump", "changelog")
+LOW_ZH = ("改名", "錯字", "格式化", "加註解", "排版", "批次改名")
+_EN_HIGH = re.compile(r"\b(" + "|".join(re.escape(w) for w in HIGH_EN) + r")\b")
+_EN_LOW = re.compile(r"\b(" + "|".join(re.escape(w) for w in LOW_EN) + r")\b")
+# Paths, file names and code spans describe the work's location, not its difficulty.
+_NOISE = re.compile(r"`[^`]*`|\S*[/\\]\S*|\S+\.(?:md|py|ts|js|json|toml|ya?ml|txt|cs|go|rs)\b")
 
 # (runtime, model, effort) per complexity, best first. Models are the runtime's own ids.
 ROUTES = {
@@ -75,15 +81,15 @@ class Decision:
 
 
 def complexity(subject: str, body: str, paths: list[str] | None = None, mode: str = "build") -> tuple[str, list[str]]:
-    text = f"{subject}\n{body}".lower()
+    text = _NOISE.sub(" ", f"{subject}\n{body}").lower()
     reasons = []
     score = 0
-    high = [w for w in HIGH_WORDS if w in text]
-    low = [w for w in LOW_WORDS if w in text]
+    high = list(dict.fromkeys(_EN_HIGH.findall(text) + [w for w in HIGH_ZH if w in text]))
+    low = list(dict.fromkeys(_EN_LOW.findall(text) + [w for w in LOW_ZH if w in text]))
     if high:
         score += 2
         reasons.append("難度關鍵字：" + "、".join(high[:4]))
-    if low:
+    elif low:  # a mechanical word never pulls hard work down
         score -= 1
         reasons.append("機械性關鍵字：" + "、".join(low[:4]))
     files = len(paths or [])
@@ -110,26 +116,33 @@ def _num(value) -> float | None:
         return None
 
 
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _window(used, reset, now) -> tuple[float | None, float | None]:
+    """A window whose reset time has passed is empty again."""
+    if reset is not None and reset < now:
+        return 0.0, None
+    return used, reset
+
+
 def claude_quota(status_file: Path | None = None, now: float | None = None) -> Quota:
     """agentdeck's statusline writes the Claude Code rate limits here; a passed reset means 0%."""
     now = now or time.time()
     path = status_file or Path.home() / ".claude" / "agentdeck-status.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = _dict(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
         return Quota("claude")
-    limits = data.get("rate_limits") or {}
-    out = Quota("claude", source=str(path))
-    resets = []
-    for key, attr in (("five_hour", "five_hour"), ("seven_day", "weekly")):
-        window = limits.get(key) or {}
-        used, reset = _num(window.get("used_percentage")), _num(window.get("resets_at"))
-        if reset is not None and reset < now:
-            used = 0.0
-        setattr(out, attr, used)
-        if reset and reset >= now:
-            resets.append((key, reset))
-    out.resets_at = _blocking_reset(out, dict(resets))
+    except (OSError, ValueError):
+        return Quota("claude", source="讀取失敗")
+    limits = _dict(data.get("rate_limits"))
+    five, week = _dict(limits.get("five_hour")), _dict(limits.get("seven_day"))
+    f_used, f_reset = _window(_num(five.get("used_percentage")), _num(five.get("resets_at")), now)
+    w_used, w_reset = _window(_num(week.get("used_percentage")), _num(week.get("resets_at")), now)
+    out = Quota("claude", f_used, w_used, source=str(path))
+    out.resets_at = _blocking_reset(out, {"five_hour": f_reset, "seven_day": w_reset})
     return out
 
 
@@ -137,18 +150,21 @@ def codex_quota(command: list[str] | None, now: float | None = None, timeout: fl
     """codex-reset-checker --json: usage.primary_window (5h) and secondary_window (weekly)."""
     if not command:
         return Quota("codex")
+    now = now or time.time()
     try:
         proc = subprocess.run([*command, "--json"], capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, check=False)
-        data = json.loads(proc.stdout) if proc.returncode == 0 else {}
+        data = _dict(json.loads(proc.stdout)) if proc.returncode == 0 else None
     except (subprocess.SubprocessError, OSError, ValueError):
-        return Quota("codex")
-    usage = data.get("usage") or {}
-    primary, secondary = usage.get("primary_window") or {}, usage.get("secondary_window") or {}
-    out = Quota("codex", _num(primary.get("used_percent")), _num(secondary.get("used_percent")),
-                source="codex-reset-checker")
-    out.resets_at = _blocking_reset(out, {"five_hour": _num(primary.get("reset_at")),
-                                          "seven_day": _num(secondary.get("reset_at"))})
+        data = None
+    if data is None:
+        return Quota("codex", source="讀取失敗")
+    usage = _dict(data.get("usage"))
+    primary, secondary = _dict(usage.get("primary_window")), _dict(usage.get("secondary_window"))
+    f_used, f_reset = _window(_num(primary.get("used_percent")), _num(primary.get("reset_at")), now)
+    w_used, w_reset = _window(_num(secondary.get("used_percent")), _num(secondary.get("reset_at")), now)
+    out = Quota("codex", f_used, w_used, source="codex-reset-checker")
+    out.resets_at = _blocking_reset(out, {"five_hour": f_reset, "seven_day": w_reset})
     return out
 
 
@@ -163,7 +179,10 @@ def _blocking_reset(quota: Quota, resets: dict) -> float | None:
 def snapshot(cfg: dict) -> dict[str, Quota]:
     settings = cfg.get("advisor") if isinstance(cfg.get("advisor"), dict) else {}
     cmd = settings.get("codex_quota_command")
-    command = shlex.split(cmd, posix=False) if isinstance(cmd, str) else cmd if isinstance(cmd, list) else None
+    if isinstance(cmd, str):  # Windows-style split keeps quotes; strip them from each token
+        command = [token.strip('"') for token in shlex.split(cmd, posix=False)]
+    else:
+        command = [str(c) for c in cmd] if isinstance(cmd, list) and cmd else None
     status = settings.get("claude_status_file")
     return {
         "claude": claude_quota(Path(status) if status else None),
@@ -193,6 +212,9 @@ def decide(subject: str, body: str, paths: list[str] | None = None, mode: str = 
     picked, fallbacks, waits, noted = None, [], [], set()
     for runtime, model, effort in candidates:
         quota = quotas.get(runtime) or Quota(runtime)
+        if quota.source == "讀取失敗" and f"{runtime}:error" not in noted:
+            noted.add(f"{runtime}:error")
+            reasons.append(f"{runtime} 額度讀取失敗，當作可用")
         if quota.blocked():
             if runtime not in noted:
                 noted.add(runtime)

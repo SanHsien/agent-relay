@@ -241,12 +241,18 @@ git 狀態                                  分支、已追蹤但未提交的檔
   build 模式不選 agy（relay 讓 agy 只讀）；只在 dispatch.runtimes 允許的 runtime 裡挑
 ```
 
-- 全部被額度擋下 → 不執行，回 `status: deferred`，寫明最早的重置時間。
+- `auto` 不可再寫 `model`／`effort`（那是某個 runtime 專用的 id，收件端會一起決定）。
+- 先做寄件者、repo、範圍的政策檢查，再查額度：沒授權的寄件者拿到 `refused`，不會看到本機額度。`dispatch.runtimes` 裡沒有能跑這種任務的 runtime（例如 build 模式只允許 agy）也是 `refused`。
+- 全部被額度擋下 → 不執行，回 `status: deferred`，寫明最早的重置時間。額度檔或 checker 輸出格式不對時當成「未知（可用）」，並在分派理由註明「讀取失敗」。
+- 關鍵字比對：英文用詞邊界，路徑、檔名、`code` 片段不算；有難度關鍵字時，機械性關鍵字不會把它降級。
 - 回信附「分派（runtime auto）」段：複雜度依據、被跳過的 runtime 與原因、選中的路由。
 - **斷線續跑**：工人失敗時看 log 結尾——
   - 像斷線或暫時性錯誤（逾時、ECONNRESET、502／503／504、overloaded…）→ 稍等後在同一個 worktree 原地重跑（沿用 [codex-auto-retry](https://github.com/SanHsien/codex-auto-retry) 的做法）。
   - 像限流（429、rate limit、usage limit、quota exceeded…）→ 改派路由表的下一個 runtime。
-  - 其他失敗不重試。重試次數由 `dispatch.retries`（預設 1）控制；每次嘗試都列在回信的「嘗試」段。
+  - 其他失敗不重試。重試次數由 `dispatch.retries`（0～3，預設 1）控制；每次嘗試都列在回信的「嘗試」段，前幾次的 log 保留為 `output.<n>.log`。
+  - 判斷只看 runtime 自己回報的錯誤：JSON 事件裡的 `is_error` 結果、`api_error_status`、codex 的 `error`／`turn.failed`，加上最後幾行非 JSON 的 stderr。工人自己的輸出（工具結果、報告裡提到 429 或 `rate_limiter.py`）不算。
+  - 已被限流的 runtime 不會再被改派回去。
+  - **每次嘗試前、跑驗收閘門前都重寫租約並延長簽出期限**；reaper 補 `interrupted` 前也會先確認那個 dispatch 行程是否還活著。
 - **交接卡**：`relay advise --card` 印出 Obsidian／Markdown 卡片：frontmatter（status、complexity、runtime、model、effort、tags）＋派給誰、範圍、要做什麼、驗收條件、備案、派工當下的額度。
 
 ```json
@@ -255,3 +261,32 @@ git 狀態                                  分支、已追蹤但未提交的檔
 ```
 
 未涵蓋：Antigravity-Manager 的帳號切換（那是帳號設定的變更，不由 relay 自動做）；agy 的額度。
+
+## 11. 驗收閘門（強制 TDD、禁止空殼、真實執行紀錄）
+
+工人做完、範圍檢查通過後，relay 在收件端跑驗收閘門；沒過就不 commit，回信狀態寫明哪一關。
+
+```text
+空殼檢查   改動的非測試 .py：函式本體只有 pass／...／raise NotImplementedError → stub-rejected
+           （@abstractmethod、@overload、Protocol／ABC 內的宣告不算）
+TDD 紅燈   信件 dispatch.tdd: true 或設定 verify.tdd: true 時：
+           在 base commit 開暫時 worktree，只放進工人新增或修改的測試檔，跑驗證指令 → 必須失敗
+           沒有測試檔、或修改前就通過 → tdd-not-proven（沒證明重現了問題）
+綠燈       在工人的 worktree 跑驗證指令 → 失敗就 verification-failed
+紀錄       每次執行的完整終端輸出存成 runs/<id>/verify-red.log、verify-green.log，
+           回信附指令、exit code、最後 15 行與 log 的 sha256；store/audit 記一筆 verify 事件（不含輸出內容）
+```
+
+收件端設定（信件**只能要求** TDD，不能提供要跑的指令）：
+
+```json
+"dispatch": {
+  "verify": {"command": ["python", "-m", "unittest"], "tdd": false, "no_stubs": true, "timeout_minutes": 10},
+  "require_verification": true
+}
+```
+
+- `command` 可以寫 `"loop-policy"`：沿用 repo 自己的 `loop-policy.toml` `[verification].quick_gate`（[ai-quality-gates](https://github.com/SanHsien/ai-quality-gates) 的格式）。
+- `require_verification: true` 時，沒有設定閘門就回 `unverified`（不 commit）；信件要求 TDD 但收件端沒設閘門也一樣。沒設這些時閘門是關的，行為和以前一樣。
+- 閘門會執行工人寫的測試程式，等同你自己手動跑測試；只對信任的寄件者與 repo 開啟。
+- 互動 session 的同類防線在 [harness-guard](https://github.com/SanHsien/harness-guard)：`claim-guard`（沒有驗證紀錄就宣稱完成會被擋）、`test-gate-guard`（測試沒綠不准 commit／push）。[agent-governance-toolkit](https://github.com/SanHsien/agent-governance-toolkit) 的執行期政策引擎可作為更嚴格的外層，relay 不直接依賴它。
