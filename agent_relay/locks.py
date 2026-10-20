@@ -215,8 +215,9 @@ class _LocalLock:
     """O_EXCL lock file around check-then-write.
 
     The file holds a random token; only its owner removes it. A lock older than
-    STALE_LOCK_S (its owner crashed) is broken by renaming it to a unique name
-    first, so two waiters cannot both break it and both win.
+    STALE_LOCK_S (its owner crashed) is broken by renaming it to a unique name and
+    checking the token moved was the stale one. A millisecond window remains where
+    two waiters could both win, and only right after a crashed holder.
     """
 
     def __init__(self, folder: Path):
@@ -242,8 +243,12 @@ class _LocalLock:
         try:
             if time.time() - self.path.stat().st_mtime <= STALE_LOCK_S:
                 return
+            stale_token = self.path.read_text(encoding="ascii")
             grave = self.path.with_name(f".lock.stale-{self.token}")
-            os.replace(self.path, grave)  # only one waiter's rename finds the stale file
+            os.replace(self.path, grave)
+            if grave.read_text(encoding="ascii") != stale_token and not self.path.exists():
+                os.replace(grave, self.path)  # we moved someone's fresh lock: put it back
+                return
             grave.unlink()
         except OSError:
             pass

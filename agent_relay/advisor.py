@@ -190,13 +190,15 @@ def decide(subject: str, body: str, paths: list[str] | None = None, mode: str = 
         for route in ROUTES[tier]:
             if route not in candidates and route[0] in usable and (allowed is None or route[0] in allowed):
                 candidates.append(route)
-    picked, fallbacks, waits = None, [], []
+    picked, fallbacks, waits, noted = None, [], [], set()
     for runtime, model, effort in candidates:
         quota = quotas.get(runtime) or Quota(runtime)
         if quota.blocked():
-            reasons.append(f"{runtime} 額度不足（5 小時 {quota.five_hour}%／週 {quota.weekly}%），跳過")
-            if quota.resets_at:
-                waits.append(quota.resets_at)
+            if runtime not in noted:
+                noted.add(runtime)
+                reasons.append(f"{runtime} 額度不足（5 小時 {quota.five_hour}%／週 {quota.weekly}%），跳過")
+                if quota.resets_at:
+                    waits.append(quota.resets_at)
             continue
         if picked is None:
             picked = (runtime, model, effort)
@@ -219,12 +221,17 @@ def decide(subject: str, body: str, paths: list[str] | None = None, mode: str = 
 
 def handoff_card(decision: Decision, subject: str, body: str, paths: list[str] | None = None) -> str:
     """Obsidian/Markdown hand-over card for the chosen worker (frontmatter + fixed sections)."""
-    dod = _section(body, ("驗收", "DoD", "完成的定義"))
+    dod_names = ("驗收", "DoD", "完成的定義")
+    dod = _section(body, dod_names)
+    work = _section(body, ("要做什麼", "目標", "任務")) or _strip_sections(body, dod_names)
     when = time.strftime("%Y-%m-%d %H:%M")
     route = (f"{decision.runtime}{' / ' + decision.model if decision.model else ''}"
              f"{' / effort ' + decision.effort if decision.effort else ''}") if decision.runtime else "（等待額度）"
+    def pct(value):
+        return "未知" if value is None else f"{value:g}%"
+
     quota_lines = "\n".join(
-        f"- {name}：5 小時 {q.get('five_hour')}%、週 {q.get('weekly')}%（{q.get('source')}）"
+        f"- {name}：5 小時 {pct(q.get('five_hour'))}、週 {pct(q.get('weekly'))}（{q.get('source')}）"
         for name, q in decision.quotas.items())
     return (
         "---\n"
@@ -239,12 +246,23 @@ def handoff_card(decision: Decision, subject: str, body: str, paths: list[str] |
         f"# {subject}\n\n"
         f"## 派給誰\n{route}\n\n" + "\n".join(f"- {r}" for r in decision.reasons) + "\n\n"
         "## 範圍\n" + ("\n".join(f"- `{p}`" for p in paths) if paths else "- （未指定）") + "\n\n"
-        f"## 要做什麼\n{body.strip()}\n\n"
+        f"## 要做什麼\n{work.strip() or '（見工單）'}\n\n"
         f"## 驗收條件（DoD）\n{dod or '照「要做什麼」；沒寫就以可驗證的證據為準。'}\n\n"
         "## 備案\n" + ("\n".join(f"- {f['runtime']}{' / ' + f['model'] if f['model'] else ''}" for f in decision.fallbacks)
                      or "- （無）") + "\n\n"
         f"## 派工當下的額度\n{quota_lines or '- （未讀取）'}\n"
     )
+
+
+def _strip_sections(body: str, names: tuple[str, ...]) -> str:
+    """The body without the named sections (so the card does not repeat the DoD)."""
+    out, skipping = [], False
+    for line in body.splitlines():
+        if re.match(r"^\s*#", line):
+            skipping = any(n.lower() in line.lower() for n in names)
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).strip()
 
 
 def _section(body: str, names: tuple[str, ...]) -> str:

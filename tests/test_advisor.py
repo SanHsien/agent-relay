@@ -108,6 +108,22 @@ class HandoffCardTests(unittest.TestCase):
                        "## 驗收條件（DoD）\nunittest 全綠", "## 備案", "## 派工當下的額度"):
             self.assertIn(needed, card)
 
+    def test_card_does_not_repeat_sections(self):
+        body = "## 要做什麼\n加註解\n\n## 驗收條件（DoD）\n有註解"
+        quotas = {**FREE, "agy": Quota("agy")}
+        card = advisor.handoff_card(advisor.decide("加註解", body, None, "build", quotas, ALL), "加註解", body)
+        self.assertEqual(card.count("## 要做什麼"), 1)
+        self.assertEqual(card.count("## 驗收條件"), 1)
+        self.assertIn("## 要做什麼\n加註解\n", card)
+        self.assertIn("agy：5 小時 未知", card)
+        plain = advisor.handoff_card(advisor.decide("x", "直接做 X", None, "build", FREE, ALL), "x", "直接做 X")
+        self.assertIn("## 要做什麼\n直接做 X", plain)
+
+    def test_reasons_not_repeated(self):
+        quotas = {**FREE, "codex": Quota("codex", 95, 1)}
+        d = advisor.decide("重構鎖的競態", "", None, "build", quotas, ALL)
+        self.assertEqual(sum("codex 額度不足" in r for r in d.reasons), 1)
+
     def test_card_when_waiting(self):
         d = advisor.decide("重構", "", None, "build", {"claude": Quota("claude", 99, 1), "codex": Quota("codex", 99, 1)},
                            ["claude", "codex"])
