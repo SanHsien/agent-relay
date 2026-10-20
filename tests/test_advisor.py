@@ -10,6 +10,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Never touch the real ~/.agent-relay: every test run gets its own home.
+os.environ["AGENT_RELAY_HOME"] = tempfile.mkdtemp(prefix="agent-relay-test-home-")
+
 from agent_relay import advisor, dispatch, envelope  # noqa: E402
 from agent_relay.advisor import Quota  # noqa: E402
 from agent_relay.store import Store  # noqa: E402
