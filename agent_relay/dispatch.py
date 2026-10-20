@@ -142,8 +142,9 @@ def validate_spec(spec: object) -> dict:
         raise envelope.EnvelopeError("dispatch.model must look like a model id")
     if "effort" in spec and spec["effort"] not in EFFORTS:
         raise envelope.EnvelopeError(f"dispatch.effort must be one of {EFFORTS}")
-    if "tdd" in spec and not isinstance(spec["tdd"], bool):
-        raise envelope.EnvelopeError("dispatch.tdd must be true or false")
+    for flag in ("tdd", "escalate"):
+        if flag in spec and not isinstance(spec[flag], bool):
+            raise envelope.EnvelopeError(f"dispatch.{flag} must be true or false")
     if "paths" in spec:
         try:
             spec["paths"] = locks.validate_paths(spec["paths"])
@@ -457,6 +458,66 @@ def predict_conflicts(repo: Path, base: str, changed: list[str], store: Path, cl
     return "\n".join(notes)
 
 
+ESCALATE_ON = ("verification-failed", "tdd-not-proven", "stub-rejected")
+
+
+def escalation_target(policy: dict, spec: dict, status: str, gate, outside: list, tampered: bool,
+                      plan: bool, round_no: int, attempts: list) -> dict | None:
+    """Should round 2 hand the worktree to a stronger model? Returns its runtime/model/effort or None.
+
+    Only on the receiver's opt-in (dispatch.escalation), only once, and only for failures a
+    better model can fix: a gate that did not pass, or a worker that failed for real (not a
+    rate limit or a network blip, which retries already handled). Never for scope or
+    tampering problems, which are the worker's conduct, not its skill.
+    """
+    target = policy.get("escalation")
+    if round_no != 1 or plan or outside or tampered or not isinstance(target, dict) or spec.get("escalate") is False:
+        return None
+    if target.get("runtime") not in RUNTIMES or target["runtime"] not in (policy.get("runtimes") or []):
+        return None
+    failed_gate = gate is not None and gate.status in ESCALATE_ON
+    failed_worker = status in ("failed", "timeout") and not any(
+        tag in attempts[-1] for tag in ("rate-limited", "transient"))
+    if not (failed_gate or failed_worker):
+        return None
+    same = (target["runtime"], target.get("model")) == (spec["runtime"], spec.get("model"))
+    if same:
+        return None  # already the strong model: escalating to itself teaches nothing
+    return {"runtime": target["runtime"], "model": target.get("model"), "effort": target.get("effort")}
+
+
+def build_escalation_prompt(env: dict, worktree: Path, branch: str, spec: dict, status: str, gate,
+                            run_dir: Path, base: str) -> str:
+    """Hand-off to the stronger model: the task, what the first worker did, and the real failure.
+
+    Same layout as docs/templates/escalation-prompt.md. Failure evidence comes from the
+    gate logs and the worker's own log, never from its claims.
+    """
+    evidence = []
+    if gate is not None:
+        evidence += [f"- {note}" for note in gate.notes]
+        for run_log in gate.logs:
+            evidence.append(f"\n`{run_log['command']}`（{run_log['phase']}）→ exit {run_log['exit']}\n```text\n"
+                            f"{run_log['tail']}\n```")
+    else:
+        evidence.append(f"- 第一個工人沒有正常結束（{status}）。它的輸出結尾：\n```text\n"
+                        f"{final_text(run_dir / 'output.log', 1500)}\n```")
+    return (
+        f"你是 agent-relay 的升級診斷工人。任務信 id {env['id']}，寄件者 {env['from']}。\n"
+        f"第一個工人（{spec['runtime']}{'/' + spec['model'] if spec.get('model') else ''}）已經在這個 worktree 做過一輪，"
+        "但沒有通過驗收。worktree 裡現在是它留下的狀態。\n"
+        f"規則：只在這個 worktree 內改檔：{worktree}（分支 {branch}）。不要 commit、不要 push、不要切分支；"
+        "relay 會在你結束後重跑驗收並替你 commit。\n\n"
+        "請照這個順序做：\n"
+        "1. 根因：讀下面的真實失敗證據與 worktree 現況，用一兩句話說明為什麼沒過（不要猜，引用證據）。\n"
+        "2. 修正：改到能通過驗收；要求 TDD 時，先有一個在修改前會失敗的測試。不要刪除測試、不要改測試設定。\n"
+        "3. 回報三段：根因、做了什麼、寄件者該跑的驗證指令。\n\n"
+        f"# 原任務：{env['subject']}\n\n{env['body']}\n\n"
+        "# 驗收失敗的真實證據\n" + "\n".join(evidence) + "\n\n"
+        f"# 第一個工人改了什麼\n```text\n{changes(worktree, base)}\n```\n"
+    )
+
+
 def gate_section(gate: "gates.GateResult") -> str:
     lines = [f"\n## 驗收閘門：{gate.status}"] + [f"- {n}" for n in gate.notes]
     for run_log in gate.logs:
@@ -590,69 +651,79 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
         retries = max(0, min(3, raw_retries)) if isinstance(raw_retries, int) and not isinstance(raw_retries, bool) else 1
         fallbacks = list(decision.fallbacks) if decision else []
         limited: set[str] = set()
-        while True:
-            # Every attempt gets a fresh lease and claim: a retry must never look abandoned.
-            write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
-                        deadline=time.time() + timeout_s + LEASE_GRACE_S)
-            if claim:
-                claim = locks.extend(Path(cfg["store"]), claim, timeout_s + LEASE_GRACE_S)
-                if sync and attempts:
-                    _sync(cfg, f"relay: extend {claim['id']}")  # other machines must see the new expiry
-            if attempts:  # keep the previous attempt's evidence
-                shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
-            argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
-            argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
-            status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
-                               extra_env={"AGENT_RELAY_HOLDER": holder})
-            failure = classify_failure(run_dir / "output.log") if status == "failed" else None
-            attempts.append(f"{spec['runtime']}{'/' + spec['model'] if spec.get('model') else ''}：{status}"
-                            f"{'（' + failure + '）' if failure else ''}")
-            if not failure or len(attempts) > retries:
-                break
-            if failure == "rate-limited":
-                limited.add(spec["runtime"])
-                nxt = next((f for f in fallbacks if f["runtime"] not in limited
-                            and f["runtime"] in ((cfg.get("dispatch") or {}).get("runtimes") or [])
-                            and (plan or f["runtime"] in advisor.BUILD_OK)), None)
-                if nxt is None:
+        escalations: list[str] = []
+        for round_no in (1, 2):  # round 2 only when the cheap worker failed and escalation is on
+            while True:
+                # Every attempt gets a fresh lease and claim: a retry must never look abandoned.
+                write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
+                            deadline=time.time() + timeout_s + LEASE_GRACE_S)
+                if claim:
+                    claim = locks.extend(Path(cfg["store"]), claim, timeout_s + LEASE_GRACE_S)
+                    if sync and attempts:
+                        _sync(cfg, f"relay: extend {claim['id']}")  # other machines must see the new expiry
+                if attempts:  # keep the previous attempt's evidence
+                    shutil.copyfile(run_dir / "output.log", run_dir / f"output.{len(attempts)}.log")
+                argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
+                argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
+                status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
+                                   extra_env={"AGENT_RELAY_HOLDER": holder})
+                failure = classify_failure(run_dir / "output.log") if status == "failed" else None
+                attempts.append(f"{spec['runtime']}{'/' + spec['model'] if spec.get('model') else ''}：{status}"
+                                f"{'（' + failure + '）' if failure else ''}")
+                if not failure or len(attempts) > retries:
                     break
-                fallbacks.remove(nxt)
-                spec = {**spec, "runtime": nxt["runtime"], "model": nxt.get("model"), "effort": nxt.get("effort")}
-                spec = {k: v for k, v in spec.items() if v is not None}
-            else:
-                time.sleep(min(30, 5 * len(attempts)))  # transient: resume in place after a short wait
-        # The gates may take a while too: extend the lease and claim once more before them.
-        gate_window = int(((policy.get("verify") or {}).get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN))) * 120
-        write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
-                    deadline=time.time() + gate_window + LEASE_GRACE_S)
-        if claim:
-            claim = locks.extend(Path(cfg["store"]), claim, gate_window + LEASE_GRACE_S)
-            if sync and policy.get("verify"):
-                _sync(cfg, f"relay: extend {claim['id']} for gates")
-        # Never run git in the worktree once the worker may have redirected its .git pointer.
-        tampered = _git_marker(worktree) != marker
-        found = None if tampered else changed_files(worktree, base)
-        changed = found or []
-        scope_note, outside = "", []
-        if claim:
-            # Unknown changes are treated as out of scope: no list, no commit.
-            outside = ["（.git 指標被改過，無法檢查）" if tampered else "（讀不到變更清單）"] if found is None \
-                else locks.out_of_scope(changed, claim["paths"])
-            scope_note = predict_conflicts(repo, base, changed, Path(cfg["store"]), claim)
-        gate = None
-        if not plan and not outside and status == "ok":
-            # Acceptance gates on the receiver's own terms: no stubs, a proven red test, a real green run.
-            gate = gates.check(repo, worktree, base, changed, run_dir, policy.get("verify") or {},
-                               want_tdd=spec.get("tdd") is True)
-            if gate.status == "skipped" and (policy.get("require_verification") or spec.get("tdd") is True):
-                gate.status = "unverified"
-                gate.notes.append("這台機器要求驗收（或信件要求 TDD），但沒有設定驗收閘門")
-            try:
-                locks.audit(Path(cfg["store"]), "verify", claim=(claim or {}).get("id", "none"), env=env_id,
-                            status=gate.status, runs=[{k: r[k] for k in ("phase", "command", "exit", "sha256")}
-                                                      for r in gate.logs])
-            except OSError:
-                pass
+                if failure == "rate-limited":
+                    limited.add(spec["runtime"])
+                    nxt = next((f for f in fallbacks if f["runtime"] not in limited
+                                and f["runtime"] in ((cfg.get("dispatch") or {}).get("runtimes") or [])
+                                and (plan or f["runtime"] in advisor.BUILD_OK)), None)
+                    if nxt is None:
+                        break
+                    fallbacks.remove(nxt)
+                    spec = {**spec, "runtime": nxt["runtime"], "model": nxt.get("model"), "effort": nxt.get("effort")}
+                    spec = {k: v for k, v in spec.items() if v is not None}
+                else:
+                    time.sleep(min(30, 5 * len(attempts)))  # transient: resume in place after a short wait
+            # The gates may take a while too: extend the lease and claim once more before them.
+            gate_window = int(((policy.get("verify") or {}).get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN))) * 180  # base, red, green
+            write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
+                        deadline=time.time() + gate_window + LEASE_GRACE_S)
+            if claim:
+                claim = locks.extend(Path(cfg["store"]), claim, gate_window + LEASE_GRACE_S)
+                if sync and policy.get("verify"):
+                    _sync(cfg, f"relay: extend {claim['id']} for gates")
+            # Never run git in the worktree once the worker may have redirected its .git pointer.
+            tampered = _git_marker(worktree) != marker
+            found = None if tampered else changed_files(worktree, base)
+            changed = found or []
+            scope_note, outside = "", []
+            if claim:
+                # Unknown changes are treated as out of scope: no list, no commit.
+                outside = ["（.git 指標被改過，無法檢查）" if tampered else "（讀不到變更清單）"] if found is None \
+                    else locks.out_of_scope(changed, claim["paths"])
+                scope_note = predict_conflicts(repo, base, changed, Path(cfg["store"]), claim)
+            gate = None
+            if not plan and not outside and status == "ok":
+                # Acceptance gates on the receiver's own terms: no stubs, a proven red test, a real green run.
+                gate = gates.check(repo, worktree, base, changed, run_dir, policy.get("verify") or {},
+                                   want_tdd=spec.get("tdd") is True)
+                if gate.status == "skipped" and (policy.get("require_verification") or spec.get("tdd") is True):
+                    gate.status = "unverified"
+                    gate.notes.append("這台機器要求驗收（或信件要求 TDD），但沒有設定驗收閘門")
+                try:
+                    locks.audit(Path(cfg["store"]), "verify", claim=(claim or {}).get("id", "none"), env=env_id,
+                                status=gate.status, runs=[{k: r[k] for k in ("phase", "command", "exit", "sha256")}
+                                                          for r in gate.logs])
+                except OSError:
+                    pass
+            esc = escalation_target(policy, spec, status, gate, outside, tampered, plan, round_no, attempts)
+            if esc is None:
+                break
+            escalations.append(f"{attempts[-1]} → 閘門 {gate.status if gate else status}；升級到 {esc['runtime']}"
+                               f"{'/' + esc['model'] if esc.get('model') else ''}")
+            prompt = build_escalation_prompt(env, worktree, branch, spec, status, gate, run_dir, base)
+            spec = {k: v for k, v in {**spec, **esc}.items() if v is not None}
+            fallbacks, limited = [], set()
         if plan:
             commit = "plan mode: nothing to commit"
         elif outside:
@@ -678,6 +749,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
             + (f"\n## 範圍與衝突預測\n簽出範圍：{', '.join(claim['paths'])}\n{scope_note}\n" if claim else "")
             + (f"\n## 分派（runtime auto）\n" + "\n".join(f"- {r}" for r in decision.reasons) + "\n" if decision else "")
             + ("\n## 嘗試\n" + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(attempts)) + "\n" if len(attempts) > 1 else "")
+            + ("\n## 回流升級\n" + "\n".join(f"- {e}" for e in escalations) + "\n" if escalations else "")
             + (gate_section(gate) if gate else "")
         )
         report["attempts"] = attempts

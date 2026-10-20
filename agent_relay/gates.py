@@ -38,8 +38,9 @@ except ModuleNotFoundError:  # Python 3.10
 
 TEST_GLOBS = ("tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "features/**")
 # Files that decide what the test run does; a worker touching them can make green meaningless.
-PROTECTED = ("**/conftest.py", "pyproject.toml", "setup.cfg", "tox.ini", "pytest.ini", "noxfile.py",
-             "loop-policy.toml", ".coveragerc", "package.json", "jest.config.*", "vitest.config.*")
+PROTECTED = tuple("**/" + name for name in (  # at any depth: monorepo sub-projects have their own
+    "conftest.py", "pyproject.toml", "setup.cfg", "tox.ini", "pytest.ini", "noxfile.py",
+    "loop-policy.toml", ".coveragerc", "package.json", "jest.config.*", "vitest.config.*"))
 DEFAULT_TIMEOUT_MIN = 10
 TAIL_LINES = 15
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0

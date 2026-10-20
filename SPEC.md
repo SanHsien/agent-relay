@@ -293,5 +293,18 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
 - `require_verification: true` 時，沒有設定閘門就回 `unverified`（不 commit）；信件要求 TDD 但收件端沒設閘門也一樣。沒設這些時閘門是關的，行為和以前一樣。
 - 閘門會執行工人寫的測試程式，等同你自己手動跑測試；只對信任的寄件者與 repo 開啟。
 - 開了閘門（或要求 TDD）而工人沒有正常結束（failed／timeout）時，relay 不 commit 半成品。
-- **已知限制**：紅燈只看 exit code，看不出失敗原因（測試 import 了工人新加的模組，在 base 上 ImportError 也算紅燈）；暫時 worktree 沒有被 gitignore 的東西（.venv、node_modules、建置產物），依賴它們的指令在 base 就會失敗，結果是 tdd-not-proven（偏向擋下）。空殼檢查只看 Python，抓不到 lambda 或其他語言。工人仍可在受保護清單以外的地方動手腳讓測試空過（例如改測試 helper），閘門擋的是「沒重現就修」和「沒跑測試就宣稱完成」，不是蓄意欺騙；合併前仍要看 diff。
+- **已知限制**：紅燈只看 exit code，看不出失敗原因（測試 import 了工人新加的模組，在 base 上 ImportError 也算紅燈）；暫時 worktree 沒有被 gitignore 的東西（.venv、node_modules、建置產物），依賴它們的指令在 base 就會失敗，結果是 tdd-not-proven（偏向擋下）。空殼檢查只看 Python，抓不到 lambda 或其他語言。被 gitignore 的新檔案不在變更清單裡，防護檢查看不到；空殼比對以「函式名稱＋本體」判斷，不分所在類別（base 某類別已有的 `__init__: pass`，會讓另一個類別新加的同樣空殼漏網）。工人仍可在受保護清單以外的地方動手腳讓測試空過（例如改測試 helper），閘門擋的是「沒重現就修」和「沒跑測試就宣稱完成」，不是蓄意欺騙；合併前仍要看 diff。
 - 互動 session 的同類防線在 [harness-guard](https://github.com/SanHsien/harness-guard)：`claim-guard`（沒有驗證紀錄就宣稱完成會被擋）、`test-gate-guard`（測試沒綠不准 commit／push）。[agent-governance-toolkit](https://github.com/SanHsien/agent-governance-toolkit) 的執行期政策引擎可作為更嚴格的外層，relay 不直接依賴它。
+
+## 12. 回流升級除錯（Fallback Escalation Loop）
+
+便宜的工人沒通過驗收時，relay 把真實失敗證據交給更強的模型，在**同一個 worktree** 診斷並修正，再用**同一套驗收閘門**重驗。Prompt 結構與判斷表見 [docs/templates/escalation-prompt.md](docs/templates/escalation-prompt.md)。
+
+```json
+"dispatch": {"escalation": {"runtime": "claude", "model": "opus"}}
+```
+
+- 觸發：閘門 `verification-failed`／`tdd-not-proven`／`stub-rejected`，或工人自己失敗、逾時（限流與斷線不算，那是重試與改派的事）。
+- 不觸發：改到範圍外、刪測試、改測試設定、`.git` 指標被改（行為問題交給人）；plan 模式；升級目標就是原本的 runtime／模型；升級 runtime 不在 `dispatch.runtimes`；信件寫 `"escalate": false`。
+- 一張派工最多升級一次。升級後仍沒過就不 commit，回信的「回流升級」段列出第一輪的結果與升級對象，閘門段是第二輪的真實紀錄。
+- 證據只取執行紀錄（閘門 log 結尾、`git diff`），不轉述第一個工人自己的說法。
