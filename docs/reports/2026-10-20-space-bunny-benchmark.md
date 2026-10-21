@@ -4,6 +4,7 @@
 
 ## 結論先講
 
+- **主人決定（2026-10-21）**：不使用 MiniMax 這類中國服務。本報告的 MiniMax 段落只留作查證紀錄，不再補測，也不放進任何路由。
 - **Space Bunny 已經不能照原計畫用**：它是 OpenRouter 的匿名測試模型 `stealth/space-bunny-alpha`，後來公布就是 **MiniMax M3.1 Flash**；免費的匿名期已結束，`space-bunny-alpha` 目前沒有可用端點，OpenCode 上的 `space-bunny-free` 也隨之失效。
 - 目前 OpenRouter 公開清單有 **`minimax/minimax-m3.1-flash:free`**：上下文 1,000,000 token、單次最多輸出 524,288 token、輸入輸出都是 $0。要呼叫它仍需要 **OpenRouter 帳號與 API key**，這台機器沒有（`OPENROUTER_API_KEY` 未設定、`opencode` 未安裝）。開帳號、填金鑰要主人自己做，所以 **MiniMax 本身的延遲、正確率、1M 承載力這次沒有實測**。
 - 「便宜工人先做、失敗再升級」的流程已在本機用同等角色的模型實測打通（下面第 3 節）。
@@ -59,4 +60,4 @@ curl.exe -s -o NUL -w "connect %{time_connect}s ttfb %{time_starttransfer}s tota
 - 便宜工人在**機械、範圍清楚**的任務上一次就過，成本約 $0.02；這才是省錢的來源。
 - 便宜工人在**規格比工單寫的更多**時，會只做表面（本例），這時靠驗收閘門抓出來、再交給強模型，總成本是 $0.019＋$0.685≈$0.70。這次沒有讓 opus 從頭單獨做同一題，所以「是否比直接用強模型貴」只能推估：第 2 輪是在 haiku 已修一半的基礎上做的，單獨跑 opus 的成本應該相近或略高。換到的是一份「為什麼第一輪不夠」的紀錄。
 - 所以順序應該是：先由 `runtime auto`（SPEC 第 10 節）把明顯困難的工單直接派給強模型，機械工單派便宜工人，再用回流升級（SPEC 第 12 節）接住判斷失誤的那一部分。
-- MiniMax M3.1 Flash 若補測後正確率接近 haiku、且免費版限流可接受，可以放進 low 層，取代 haiku 進一步壓低成本。
+- ~~MiniMax M3.1 Flash 放進 low 層~~：主人不使用中國服務，不採用。low 層維持 haiku／codex low／agy。
