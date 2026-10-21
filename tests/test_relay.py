@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 # Never touch the real ~/.agent-relay: every test run gets its own home.
 os.environ["AGENT_RELAY_HOME"] = tempfile.mkdtemp(prefix="agent-relay-test-home-")
 
-from agent_relay import cli, doorbell, envelope, gitsync, poller  # noqa: E402
+from agent_relay import __version__, cli, doorbell, envelope, gitsync, poller  # noqa: E402
 from agent_relay.store import Store, StoreError  # noqa: E402
 
 
@@ -255,6 +255,14 @@ class PollerTests(unittest.TestCase):
 
 
 class CliTests(Base):
+    def test_version(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agent_relay", "--version"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"agent-relay {__version__}")
+
     def test_send_inbox_read_ack_json(self):
         store = str(self.dir / "store")
         with mock.patch.dict(os.environ, {"AGENT_RELAY_STORE": store}):

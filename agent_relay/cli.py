@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import advisor, config, doorbell, envelope, gitsync, locks, poller, signing
+from . import __version__, advisor, config, doorbell, envelope, gitsync, locks, poller, signing
 from . import context as handover
 from . import gc as relay_gc
 from . import status as relay_status
@@ -371,6 +371,7 @@ def cmd_poller(args, cfg) -> int:
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-relay", description="File + git mailbox for AI agents")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="write ~/.agent-relay/config.json")
