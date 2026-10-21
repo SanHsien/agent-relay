@@ -15,9 +15,8 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config, envelope, gates, gitsync, locks, signing
+from . import config, envelope, gates, gitsync, locks, procs, signing
 from .store import Store
-from . import procs
 
 SHA_LEN = 40
 
@@ -99,7 +98,7 @@ def preflight(cfg: dict, env: dict, repo: Path, into: str | None) -> tuple[str, 
 
 
 def accept(cfg: dict, agent: str, reply_id: str, repo: Path, into: str | None = None,
-           sync: bool = True) -> dict:
+           sync: bool = True, push: bool = False) -> dict:
     """Fetch, merge in a scratch worktree, verify the merge, fast-forward. A refusal is status 'rejected'.
 
     Raises AcceptError only for problems on this side (see preflight); those record nothing.
@@ -137,6 +136,15 @@ def accept(cfg: dict, agent: str, reply_id: str, repo: Path, into: str | None = 
         # The exact merge commit that was verified, nothing else: a fast-forward to it.
         _git(repo, "merge", "--ff-only", "--quiet", merged)
         report.update(status="accepted", merge=merged)
+        if push or (cfg.get("accept") or {}).get("push"):
+            # Only the branch that was verified and fast-forwarded; hooks stay on (the owner's repo).
+            proc = procs.run(["git", "-C", str(repo), "push", "--quiet", "origin", current],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             check=False, timeout=300)
+            if proc.returncode == 0:
+                report["pushed"] = f"origin/{current}"
+            else:
+                notes.append(f"merged, but push failed: {(proc.stderr or proc.stdout).strip()[:300]}")
     except AcceptError as exc:
         report["reason"] = str(exc)
     except (subprocess.SubprocessError, OSError) as exc:

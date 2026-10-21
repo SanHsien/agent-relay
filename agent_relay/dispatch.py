@@ -160,6 +160,26 @@ def validate_spec(spec: object) -> dict:
     return spec
 
 
+DEFAULT_SPEC_KEYS = ("runtime", "mode", "model", "effort", "timeout_minutes", "tdd", "escalate", "paths")
+
+
+def default_spec(env: dict, policy: dict) -> dict:
+    """The dispatch section a plain task (kind=task, no --run) gets from dispatch.default.
+
+    The repo is the task's `project` (send --project) or dispatch.default.repo. The
+    sender, signature and repo_roots checks still apply exactly as for --run mail.
+    """
+    default = policy.get("default")
+    if not isinstance(default, dict) or not default.get("runtime"):
+        raise DispatchError("plain task and no dispatch.default on this machine")
+    repo = env.get("project") or default.get("repo")
+    if not repo:
+        raise DispatchError("plain task without a repo: send it with --project <repo> (or set dispatch.default.repo)")
+    spec = {k: default[k] for k in DEFAULT_SPEC_KEYS if k in default}
+    spec["repo"] = repo
+    return spec
+
+
 def policy_check(env: dict, spec: dict, policy: dict, allowed_signers: Path | None = None) -> Path:
     """Return the resolved repo, or raise when the receiver has not allowed this.
 
@@ -984,7 +1004,8 @@ def _sync(cfg: dict, message: str) -> None:
 # ---------------------------------------------------------------- main entry
 
 
-def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool = False) -> dict:
+def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool = False,
+             use_default: bool = False) -> dict:
     """Run one task and send the result envelope. Every outcome ends in one reply and an ack."""
     store = Store(cfg["store"])
     if sync:
@@ -1011,9 +1032,14 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
     slot: Path | None = None
     changed: list[str] = []
     try:
-        if env["kind"] != "task" or "dispatch" not in env:
+        if env["kind"] != "task":
+            raise DispatchError("not a task")
+        if "dispatch" in env:
+            spec = validate_spec(env["dispatch"])
+        elif use_default:
+            spec = validate_spec(default_spec(env, cfg.get("dispatch") or {}))
+        else:
             raise DispatchError("not a task with a dispatch section")
-        spec = validate_spec(env["dispatch"])
         timeout_s = spec.get("timeout_minutes", DEFAULT_TIMEOUT_MIN) * 60
         write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
                     deadline=time.time() + timeout_s + LEASE_GRACE_S)
@@ -1309,16 +1335,27 @@ def ring_dispatch(env: dict, bell: dict) -> str:
     process that does not inherit our environment, so the relay home and store
     are passed as arguments, not environment variables.
     """
-    if env["kind"] != "task" or "dispatch" not in env:
-        return "skipped: no dispatch section"
-    cmd = [_console_python(), "-m", "agent_relay", "dispatch", env["id"], "--agent", env["to"],
-           "--home", str(config.home())]
+    if env["kind"] != "task":
+        return "skipped: not a task"
+    extra = []
+    if "dispatch" not in env:
+        # A plain task runs only where the receiver set dispatch.default (SPEC 18).
+        if not ((config.load().get("dispatch") or {}).get("default")):
+            return "skipped: no dispatch section"
+        extra = ["--default"]
+    return launch(["dispatch", env["id"], "--agent", env["to"], *extra], f"relay {env['id'][-6:]}",
+                  bell.get("window", True))
+
+
+def launch(args: list[str], title: str, window: bool = True) -> str:
+    """Start `python -m agent_relay <args>` outside the watch task: a Windows Terminal tab, or detached."""
+    cmd = [_console_python(), "-m", "agent_relay", *args, "--home", str(config.home())]
     if os.environ.get("AGENT_RELAY_STORE"):
         cmd += ["--store", os.environ["AGENT_RELAY_STORE"]]
     workdir = str(Path(__file__).resolve().parent.parent)
-    wt = shutil.which("wt.exe") if bell.get("window", True) else None
+    wt = shutil.which("wt.exe") if window else None
     if wt:
-        subprocess.Popen([wt, "-w", "0", "new-tab", "--title", f"relay {env['id'][-6:]}", "-d", workdir, *cmd],
+        subprocess.Popen([wt, "-w", "0", "new-tab", "--title", title, "-d", workdir, *cmd],
                          creationflags=CREATE_NO_WINDOW)
         return "ok: Windows Terminal tab"
     flags = DETACHED_PROCESS | NEW_PROCESS_GROUP if sys.platform == "win32" else 0

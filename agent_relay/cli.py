@@ -92,7 +92,8 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
 
 
 def cmd_dispatch(args, cfg) -> int:
-    report = dispatcher.dispatch(args.id, _agent(args, cfg), cfg, sync=not args.no_sync, force=args.force)
+    report = dispatcher.dispatch(args.id, _agent(args, cfg), cfg, sync=not args.no_sync, force=args.force,
+                                 use_default=args.default)
     text = chr(10).join(f"{k}: {v}" for k, v in report.items())
     _out(args, report, text)
     return 0 if report["status"] == "ok" else 4
@@ -208,7 +209,8 @@ def cmd_send(args, cfg) -> int:
 
 def cmd_accept(args, cfg) -> int:
     try:
-        report = accepter.accept(cfg, _agent(args, cfg), args.id, Path(args.repo), args.into, sync=not args.no_sync)
+        report = accepter.accept(cfg, _agent(args, cfg), args.id, Path(args.repo), args.into, sync=not args.no_sync,
+                                 push=args.push)
     except (accepter.AcceptError, StoreError) as exc:  # a local problem: nothing was recorded or changed
         raise SystemExit(f"error: {exc}") from exc
     except subprocess.SubprocessError as exc:  # git timed out before anything was changed
@@ -309,7 +311,12 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
     report = []
     for env in fresh:
-        report.append({"id": env["id"], "subject": env["subject"], "bells": doorbell.ring(env, cfg["doorbells"])})
+        entry = {"id": env["id"], "subject": env["subject"], "bells": doorbell.ring(env, cfg["doorbells"])}
+        auto = automate(env, agent, cfg)
+        if auto:
+            entry["auto"] = auto
+            doorbell._log(f"auto {env['id']} -> {auto}")
+        report.append(entry)
         rung.append(env["id"])
         doorbell.save_rung(agent, rung)  # per message: a run cut short does not re-ring the rest
     if relay_status.heartbeat(cfg, agent) and sync:
@@ -340,6 +347,43 @@ def cmd_gc(args, cfg) -> int:
             _sync(args, cfg, f"relay: {agent} gc {sum(a['kind'] == 'done-mail' for a in actions)} done messages")
     _out(args, actions, relay_gc.render(actions, args.apply))
     return 9 if any(a.get("error") for a in actions) else 0
+
+
+def accept_repo(env: dict, cfg: dict) -> Path | None:
+    """The commander's clone for a dispatch reply: the original task's repo folder name under accept.repo_roots."""
+    hit = Store(cfg["store"]).find(env["from"], env.get("reply_to", ""))
+    if hit is None:
+        return None
+    try:
+        task = envelope.loads(hit[1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    repo = (task.get("dispatch") or {}).get("repo") or task.get("project")
+    if not repo:
+        return None
+    name = Path(str(repo).replace("\\", "/")).name
+    for root in (cfg.get("accept") or {}).get("repo_roots") or []:
+        candidate = Path(root) / name
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def automate(env: dict, agent: str, cfg: dict) -> str | None:
+    """What this machine does on its own with a new message, beyond ringing (SPEC 18)."""
+    if env["kind"] == "note" and env.get("reply_to") and env["subject"].startswith(("accepted:", "rejected:")) \
+            and cfg.get("auto_ack_notes", True):
+        Store(cfg["store"]).ack(agent, env["id"])  # pure information: the accept already happened
+        return "acked accept note"
+    settings = cfg.get("accept") or {}
+    result = env.get("result") or {}
+    if env["kind"] == "result" and settings.get("auto") and result.get("status") == "ok" and result.get("pushed"):
+        repo = accept_repo(env, cfg)
+        if repo is None:
+            return "auto-accept skipped: no clone of the task's repo under accept.repo_roots"
+        args = ["accept", env["id"], "--repo", str(repo), "--agent", agent] + (["--push"] if settings.get("push") else [])
+        return "auto-accept " + dispatcher.launch(args, f"accept {env['id'][-6:]}", settings.get("window", False))
+    return None
 
 
 def cmd_watch(args, cfg) -> int:
@@ -447,6 +491,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--agent")
     s.add_argument("--store", help="store folder override")
     s.add_argument("--force", action="store_true", help="run a task that is already done")
+    s.add_argument("--default", action="store_true", help="a plain task: use this machine's dispatch.default")
     s.set_defaults(func=cmd_dispatch)
 
     for name, func, helptext in (("read", cmd_read, "show a message and mark it read"), ("ack", cmd_ack, "mark done")):
@@ -459,6 +504,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("id", help="the dispatch reply (kind=result) in your mailbox")
     s.add_argument("--repo", required=True, help="your clone of the repo to merge into")
     s.add_argument("--into", help="the branch to merge into (must be checked out; default: the current one)")
+    s.add_argument("--push", action="store_true", help="push the branch to origin after a successful merge")
     s.add_argument("--agent")
     s.set_defaults(func=cmd_accept)
 

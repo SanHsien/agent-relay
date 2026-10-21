@@ -475,3 +475,27 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
 - N 必須是正數，而且不能短於 `dispatch.max_age_hours`（預設 7 天）。`max_age_hours` 不是正數時，gc 拒絕執行：這時舊的簽章信永遠會被接受，只剩本機 run 紀錄能擋重放（第 13 節）。
 - 被保留的項目會標示 `kept: <git 的原因>`，不算失敗。
 - git 操作會關掉 hooks。某一項失敗時只記錄在該項，不影響其他項；有失敗時退出碼為 9。
+
+## 18. 不經人工的收信處理
+
+三個開關都要明確設定才會生效，而且都沿用前面各節的安全檢查：
+
+```json
+// 收件端 config.json
+"dispatch": {"default": {"runtime": "claude", "mode": "build", "timeout_minutes": 30}}
+// 指揮者 config.json
+"accept": {"auto": true, "repo_roots": ["C:\GitHub"], "push": false, "window": false}
+// 任一端（預設 true）
+"auto_ack_notes": true
+```
+
+- **一般 task 自動施工**（`dispatch.default`）：沒有 `--run` 的 `kind=task` 信件，會套用收件端的預設工人、模式、逾時與 TDD 設定開工，等同寄件者寫了 `--run`。
+  - repo 取自信件的 `project`（`send --project <repo>`），沒有就用 `dispatch.default.repo`；兩者都沒有就回 `refused`，並提示寄件者加 `--project`。
+  - 寄件者名單、簽章、`repo_roots`、上限、驗收閘門全部照第 7、9、11、13、15 節執行。
+  - 收件端沒設 `dispatch.default` 時，一般 task 只會響門鈴，等人處理。
+- **指揮者自動驗收**（`accept.auto`）：收到 `status: ok` 而且已推送的結果信時，`watch` 會在背景啟動 `relay accept`，流程照第 14 節，驗證通過才合併。
+  - 本機 clone 的找法：原派工信的 repo 資料夾名稱，到 `accept.repo_roots` 底下找同名的 git repo；找不到就略過，記在 log。
+  - 本機前置檢查不通過時（工作目錄不乾淨、分支不對），accept 不會留下任何紀錄，回信維持未結案，`relay status` 看得到，可以手動 `relay accept`。
+  - `accept.push: true`：合併後把該分支推送到 origin（`relay accept --push` 同效）。
+  - `accept.window: true`：在 Windows Terminal 分頁執行；預設在背景執行。
+- **純通知自動結案**（`auto_ack_notes`）：relay accept 寄給收件端的 `accepted:`／`rejected:` 開頭 note 只是通知，`watch` 響完門鈴就自動 ack。
