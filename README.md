@@ -39,23 +39,14 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 
 ### 一台電腦：指揮者＋本機工人
 
-同一台電腦可以同時當指揮者和收件端。兩邊各用一個 home、共用同一份 store，各自有一個排程，並互相信任對方的簽章金鑰：
+同一台電腦可以同時當指揮者和收件端。兩邊各用一個 home、共用同一份 store，各自有一個排程，並互相信任對方的簽章金鑰。一行指令建好，之後也能用它復原（SPEC §19）：
 
 ```powershell
-# 收件端（工人）：另一個 home，信箱 claude-code
-python -m agent_relay keygen --home $HOME\.agent-relay-worker --agent claude-code
-python -m agent_relay trust commander $HOME\.agent-relay\keys\commander_ed25519.pub --home $HOME\.agent-relay-worker
-python -m agent_relay trust claude-code $HOME\.agent-relay-worker\keys\claude-code_ed25519.pub   # 指揮者信任工人
-python -m agent_relay poller install --agent claude-code --every 5 --home $HOME\.agent-relay-worker
+python -m pip install -e C:\GitHubgent-relay            # 任何資料夾都能執行 python -m agent_relay
+python -m agent_relay setup-local --auto                   # 指揮者＋本機工人＋兩個排程；可重複執行
 ```
 
-`$HOME\.agent-relay-worker\config.json` 的 `dispatch` 段落寫明以下設定（SPEC §7、§11、§15）：
-
-- 允許的 runtime 與 `repo_roots`；
-- `senders: ["commander"]`；
-- `verify: {"command": "auto"}`；
-- `push_branch: true`；
-- `max_concurrent`、`daily_limit`。
+工人的政策在 `$HOME\.agent-relay-worker\config.json` 的 `dispatch` 段落（SPEC §7、§11、§15、§18）：允許的 runtime 與 `repo_roots`、`senders: ["commander"]`、`verify: {"command": "auto"}`、`push_branch`、`max_concurrent`、`daily_limit`、一般 task 用的 `default`。
 
 日常派工與驗收（在指揮者端）：
 
@@ -99,6 +90,8 @@ python -m agent_relay accept <回信 id> --repo C:\GitHub\<repo>  # 在本機重
 | 並發／每日上限、防重跑 | `dispatch.max_concurrent`、`daily_limit` | 15 | [T-09](docs/evidence/2026-10-21-t09-limits.md) | T-20261021-09 |
 | 總覽與收件端心跳 | `status`、`hosts/` | 16 | [T-10](docs/evidence/2026-10-21-t10-status.md) | T-20261021-10 |
 | 清理 worktree／分支／run 紀錄 | `gc` | 17 | [T-11](docs/evidence/2026-10-21-t11-gc.md) | T-20261021-11 |
+| 不經人工的收信處理（預設工人、自動驗收、通知自動結案） | `dispatch.default`、`accept.auto` | 18 | — | — |
+| 本機一鍵建立與復原 | `setup-local` | 19 | [真實端到端](docs/evidence/2026-10-21-real-e2e.md) | — |
 
 Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
 

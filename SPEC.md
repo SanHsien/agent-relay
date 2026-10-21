@@ -499,3 +499,25 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
   - `accept.push: true`：合併後把該分支推送到 origin（`relay accept --push` 同效）。
   - `accept.window: true`：在 Windows Terminal 分頁執行；預設在背景執行。
 - **純通知自動結案**（`auto_ack_notes`）：relay accept 寄給收件端的 `accepted:`／`rejected:` 開頭 note 只是通知，`watch` 響完門鈴就自動 ack。
+
+## 19. 本機一鍵建立與復原（`relay setup-local`）
+
+```powershell
+python -m agent_relay init --agent commander --clone <store repo> --branch mailbox   # 新電腦先做一次
+python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime claude --runtime codex ...]
+```
+
+依序建立或補齊下列項目。可以重複執行，每一步只補缺少的部分：
+
+1. 指揮者的簽章金鑰；
+2. 工人 home（預設 `~/.agent-relay-worker`，信箱 `claude-code`）與它的 `config.json`；
+3. 工人的簽章金鑰；
+4. 雙方互相信任；
+5. 指揮者的 `accept` 預設值；
+6. 兩個 Windows 排程。
+
+- **不覆蓋**：設定只補缺少的鍵，你自己改過的值會保留；已有的金鑰沿用；信任清單不重複寫入；排程用同名重新註冊。
+- `--auto` 會一併打開第 18 節的 `dispatch.default` 與 `accept.auto`。
+- **備份策略**：
+  - 設定檔與排程：由這個指令和你的參數重建，不用另外備份。不過，自己手動改過的設定值不在指令參數裡，可以抄進你自己的筆記。
+  - 私鑰：**不備份，也不進 git**。它們沒有加密任何資料，只用來證明信件是誰寄的；遺失或換電腦時，重跑這個指令會產生新金鑰並重新互信。舊金鑰簽的信，在第 13 節的 `max_age_hours` 內仍會被當成有效，所以懷疑私鑰外洩時，先刪掉 `allowed_signers` 裡對應的那一行，再重跑。

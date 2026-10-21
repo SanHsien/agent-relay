@@ -386,6 +386,19 @@ def automate(env: dict, agent: str, cfg: dict) -> str | None:
     return None
 
 
+def cmd_setup_local(args, cfg) -> int:
+    from . import setup as relay_setup
+
+    try:
+        steps = relay_setup.setup_local(config.home(), Path(args.worker_home).expanduser(), args.worker_agent,
+                                        args.repo_root or None, args.runtime or None, args.every, args.auto,
+                                        install_tasks=not args.no_tasks)
+    except (RuntimeError, signing.SigningError) as exc:
+        raise SystemExit(f"error: {exc}") from exc
+    _out(args, steps, chr(10).join(steps))
+    return 0
+
+
 def cmd_watch(args, cfg) -> int:
     agent = _agent(args, cfg)
     while True:
@@ -531,6 +544,17 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true",
                    help="also remove dirty worktrees and unmerged branches of work never accepted")
     s.set_defaults(func=cmd_gc)
+
+    s = sub.add_parser("setup-local", help="create or repair this machine's commander + worker setup (idempotent)")
+    s.add_argument("--worker-home", default=str(Path.home() / ".agent-relay-worker"))
+    s.add_argument("--worker-agent", default="claude-code")
+    s.add_argument("--repo-root", action="append", help="repos the worker may work in (default C:/GitHub)")
+    s.add_argument("--runtime", action="append", help="worker runtimes (default claude, codex, hermes)")
+    s.add_argument("--every", type=int, default=5, help="watch interval in minutes")
+    s.add_argument("--auto", action="store_true",
+                   help="also turn on dispatch.default and accept.auto (no human in the loop, SPEC 18)")
+    s.add_argument("--no-tasks", action="store_true", help="do not (re)register the scheduled tasks")
+    s.set_defaults(func=cmd_setup_local)
 
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")
