@@ -35,7 +35,39 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 # Claude Code SessionStart hook：見 SPEC.md 第 8 節
 ```
 
-每個指令加 `--json` 輸出機器可讀格式；加 `--no-sync` 只動本機、不碰 git。
+每個指令加 `--json` 輸出機器可讀格式；加 `--no-sync` 只動本機、不碰 git。所有指令都接受 `--home <資料夾>`，可指定使用哪一個 relay home。
+
+### 一台電腦：指揮者＋本機工人
+
+同一台電腦可以同時當指揮者和收件端。兩邊各用一個 home、共用同一份 store，各自有一個排程，並互相信任對方的簽章金鑰：
+
+```powershell
+# 收件端（工人）：另一個 home，信箱 claude-code
+python -m agent_relay keygen --home $HOME\.agent-relay-worker --agent claude-code
+python -m agent_relay trust commander $HOME\.agent-relay\keys\commander_ed25519.pub --home $HOME\.agent-relay-worker
+python -m agent_relay trust claude-code $HOME\.agent-relay-worker\keys\claude-code_ed25519.pub   # 指揮者信任工人
+python -m agent_relay poller install --agent claude-code --every 5 --home $HOME\.agent-relay-worker
+```
+
+`$HOME\.agent-relay-worker\config.json` 的 `dispatch` 段落寫明以下設定（SPEC §7、§11、§15）：
+
+- 允許的 runtime 與 `repo_roots`；
+- `senders: ["commander"]`；
+- `verify: {"command": "auto"}`；
+- `push_branch: true`；
+- `max_concurrent`、`daily_limit`。
+
+日常派工與驗收（在指揮者端）：
+
+```powershell
+# 派工：起點是 origin/main（在該 repo 資料夾裡執行，--base 才解析得到；或直接給 40 位 sha），要求 TDD，限定可改的檔案
+python -m agent_relay send --to claude-code --kind task --run codex --repo C:\GitHub\<repo> `
+  --base origin/main --tdd --path src/ --path tests/ --subject "..." --body-file task.md
+python -m agent_relay status                                   # 信箱、心跳、執行中的派工
+python -m agent_relay accept <回信 id> --repo C:\GitHub\<repo>  # 在本機重跑驗證，通過才合併
+```
+
+第一張真實工單的完整紀錄見 [docs/evidence/2026-10-21-real-e2e.md](docs/evidence/2026-10-21-real-e2e.md)。
 
 ## 運作方式
 
