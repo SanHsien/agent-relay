@@ -183,6 +183,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
     `setup-local` 的預設模型是 `gpt-6.1-sol`。
   - 讀不到設定檔時回 `refused`。`runtime auto`、改派、升級都不會選它，因為它的額度查不到，必須明寫 `--run claude-3p`。
 - **假造的工具呼叫**：工人的回報裡若出現用文字寫出的工具呼叫標記，例如 `<function_calls>`、`<invoke name=`，表示它可能沒有真的讀檔、自己編了輸出。實測 claude-3p 曾發生一次。回信會加上警告，`result.warnings` 為 `["fake-tool-calls"]`；唯讀工單的 prompt 也會要求先用工具讀實際檔案，結論附檔名與行號。
+- **唯讀（plan）claude 工人的工具**：只給 `--tools Read,Glob,Grep`。agent-cortex 的唯讀組法原本傳 `--tools ""`，等於一個工具都不給；實測時，工人因此讀不到任何檔案。寫入仍由 plan 權限模式擋下。
 - **claude 工人的隔離**（`claude` 與 `claude-3p` 都適用）：
   - 加上 `--strict-mcp-config --mcp-config <空清單>`：工人拿不到主人的 MCP 伺服器。實測曾看到工人試著呼叫主人的 GitHub、爬網、搜尋 MCP。
   - 加上 `--setting-sources project,local`：不載入主人使用者層的 hooks 與 plugins。

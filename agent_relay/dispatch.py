@@ -359,6 +359,8 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
             argv = [a for a in argv if a != "--remote-control"]
             if tools and not plan:
                 argv += ["--allowedTools", *tools]
+            if plan:
+                argv = _plan_tools(argv)
             return _prompt_to_stdin(argv, prompt) + claude_isolation(log_dir, is_3p), "agent-cortex", prompt
         if runtime == "codex":
             argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
@@ -370,6 +372,8 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
                 "--permission-mode", "plan" if plan else "acceptEdits", "--add-dir", str(worktree)]
         if tools and not plan:
             argv += ["--allowedTools", *tools]
+        if plan:
+            argv = _plan_tools(argv)
         argv += claude_isolation(log_dir, is_3p)
         stdin = prompt
     elif runtime == "codex":
@@ -407,6 +411,24 @@ def check_3p_model(model: str) -> None:
         raise DispatchError(f"claude-3p: {model!r} is from a provider this machine does not use")
     if OPAQUE_3P_ROUTE_RE.search(model):
         raise DispatchError(f"claude-3p: {model!r} lets the gateway pick the model (maybe a Claude one); name a model")
+
+
+PLAN_TOOLS = "Read,Glob,Grep"
+
+
+def _plan_tools(argv: list[str]) -> list[str]:
+    """A plan (read-only) claude worker gets the read-only built-in tools.
+
+    Found live: agent-cortex's read-only builder passes `--tools ""` (no tools at
+    all), so a plan worker could not open a single file; one model said so, another
+    made up a tool call and its output. Plan permission mode still refuses writes.
+    """
+    out = list(argv)
+    if "--tools" in out:
+        out[out.index("--tools") + 1] = PLAN_TOOLS
+    else:
+        out += ["--tools", PLAN_TOOLS]
+    return out
 
 
 def claude_isolation(log_dir: Path, bare: bool) -> list[str]:

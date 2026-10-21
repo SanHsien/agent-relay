@@ -534,6 +534,20 @@ class Claude3pTests(DispatchBase):
         self.assertNotIn("--bare", official)  # the official login is OAuth, which --bare does not read
         self.assertIn("--bare", gateway)
 
+    def test_plan_workers_get_read_only_tools(self):
+        cfg = self.profile()
+        cfg["dispatch"]["claude_3p"]["model"] = "gpt-6.1-sol"
+        cortex = mock.Mock()
+        cortex.build_claude_argv.return_value = ["claude", "-p", "P", "--permission-mode", "plan", "--tools", ""]
+        for launcher in (None, cortex):
+            for runtime in ("claude", "claude-3p"):
+                with self.subTest(cortex=bool(launcher), runtime=runtime), \
+                        mock.patch.object(dispatch, "_cortex_launcher", return_value=launcher):
+                    argv, _, _ = dispatch.build_argv({"runtime": runtime, "repo": "x", "mode": "plan"}, "P", "s",
+                                                     self.dir / "L", self.dir, cfg)
+                    self.assertEqual(argv[argv.index("--tools") + 1], "Read,Glob,Grep")
+                    self.assertEqual(argv.count("--tools"), 1)
+
     def test_only_named_non_anthropic_models(self):
         for ok in ("gpt-6.1-sol", "google-antigravity/gemini-3.8-flash", "cursor/gpt-5.6-sol"):
             dispatch.check_3p_model(ok)
