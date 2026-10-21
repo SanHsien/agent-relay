@@ -21,7 +21,7 @@ python -m agent_relay ack <id>
 - 要讓收件端專案下一個 session `/pickup` 接得到，加 `--project <收件端機器上的專案路徑>`；不知道路徑就寫 `--project asr:<會話名>`，收件端會從 agent-session-restore 的登記檔查。
 - 信件會進 git 歷史：不放 API key、token、密碼。
 - 派工信要簽章（SPEC 第 13 節）：寄件端先 `relay keygen`，把公鑰交給收件端，由收件端 `relay trust <你的信箱> <公鑰>`。有金鑰時 `send` 會自動簽章。收件端 `dispatch.senders` 沒設就拒絕所有派工。
-- 要收件端**自動開新 Session 施工**：加 `--run claude|codex|agy|hermes --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。不確定派給誰就寫 `--run auto`，收件端依複雜度與它的額度挑（SPEC 第 10 節）；`--path` 寫出工人可改的檔案範圍（SPEC 第 9 節）。
+- 要收件端**自動開新 Session 施工**：加 `--run claude|claude-3p|codex|agy|hermes --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節）。claude-3p 走主人的 Claude Desktop 3P gateway（見 SPEC 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。不確定派給誰就寫 `--run auto`，收件端依複雜度與它的額度挑（SPEC 第 10 節）；`--path` 寫出工人可改的檔案範圍（SPEC 第 9 節）。
 
 ## 信箱名稱
 
