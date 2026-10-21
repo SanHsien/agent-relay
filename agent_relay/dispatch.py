@@ -345,6 +345,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
         model = model or (cfg.get("dispatch") or {}).get("claude_3p", {}).get("model")
         if not model:
             raise DispatchError("claude-3p needs a model: dispatch.model, or dispatch.claude_3p.model on this machine")
+        check_3p_model(model)
         runtime, spec = "claude", {**spec, "model": model}
     if runtime == "hermes":
         return build_hermes_argv(spec, prompt, log_dir, worktree), "built-in", None
@@ -383,6 +384,29 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     if model:
         argv += ["--model", model]
     return argv, "built-in", stdin
+
+
+ANTHROPIC_MODEL_RE = re.compile(r"(^|/)(claude|anthropic)\b|^anthropic/", re.I)
+# The owner does not use these providers (2026-10-21); a gateway may still list them.
+DENIED_3P_MODEL_RE = re.compile(r"kimi|moonshot|minimax|qwen|deepseek|glm|zhipu|doubao|baichuan|yi-", re.I)
+
+
+OPAQUE_3P_ROUTE_RE = re.compile(r"^combo/|/auto(-|$)", re.I)
+
+
+def check_3p_model(model: str) -> None:
+    """claude-3p exists to spend the gateway's non-Anthropic subscriptions.
+
+    A Claude model through the gateway only costs the same as the official login,
+    so it is refused with a pointer to --run claude; providers the owner does not
+    use are refused as well.
+    """
+    if ANTHROPIC_MODEL_RE.search(model):
+        raise DispatchError(f"claude-3p runs non-Anthropic models only ({model!r}); use --run claude for Claude models")
+    if DENIED_3P_MODEL_RE.search(model):
+        raise DispatchError(f"claude-3p: {model!r} is from a provider this machine does not use")
+    if OPAQUE_3P_ROUTE_RE.search(model):
+        raise DispatchError(f"claude-3p: {model!r} lets the gateway pick the model (maybe a Claude one); name a model")
 
 
 def claude_isolation(log_dir: Path, bare: bool) -> list[str]:
@@ -520,7 +544,8 @@ def _prompt_to_stdin(argv: list[str], prompt: str) -> list[str]:
 
 def build_prompt(env: dict, worktree: Path, branch: str, plan: bool, handover: str = "") -> str:
     rules = (
-        "只讀不改，最後輸出你的結論與證據。" if plan else
+        "只讀不改。回答前先用工具讀實際的檔案，結論要附檔名與行號；不要在文字裡模擬或假造工具呼叫與輸出。"
+        "最後輸出你的結論與證據。" if plan else
         f"只在這個 worktree 內改檔：{worktree}（分支 {branch}）。不要 commit、不要 push、不要切分支、"
         "不要碰 worktree 以外的路徑；你結束後 relay 會替你 commit。能執行指令就只在 worktree 內跑驗證；"
         "不能執行就在回報裡寫清楚寄件者該跑哪些驗證指令。"
@@ -982,11 +1007,16 @@ def push_branch(repo: Path, branch: str, commit: str, policy: dict) -> dict:
     return {"remote": "origin", "ref": ref, "commit": commit}
 
 
+FAKE_TOOL_RE = re.compile(r"<function_calls>|<invoke name=|<invoke_result>|<tool_output>|<parameter name=")
+FAKE_TOOL_WARNING = ("工人的回報裡有用文字假造的工具呼叫（例如 <function_calls>），它可能沒有真的讀檔，"
+                     "回報內容不可信；以閘門 log 與 diff 為準。")
+
+
 def result_fields(report: dict) -> dict:
     """The machine-readable part of a dispatch reply (SPEC section 7): what `relay accept` reads."""
     fields = {"status": report["status"], "runtime": report.get("runtime"), "branch": report.get("branch"),
               "commit": report.get("commit_sha"), "base": report.get("base"), "gate": report.get("gate"),
-              "usage": report.get("usage"), "pushed": report.get("pushed")}
+              "usage": report.get("usage"), "pushed": report.get("pushed"), "warnings": report.get("warnings")}
     return {k: v for k, v in fields.items() if v is not None}
 
 
@@ -1225,13 +1255,18 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                       log=str(run_dir / "output.log"))
         if commit.startswith("committed:"):
             report["commit_sha"] = _git(worktree, "rev-parse", "HEAD").strip()
+        worker_text = final_text(run_dir / "output.log")
+        suspect = bool(FAKE_TOOL_RE.search(worker_text))
+        if suspect:
+            report["warnings"] = ["fake-tool-calls"]
         body = (
             f"status: {status}（exit {code}）\nruntime: {spec['runtime']}（指令由 {source} 組）\n"
             f"指令: {' '.join(shown)}\n"
             f"worktree: {worktree}\nbranch: {branch}\nrelay commit: {commit}\n耗時: {report['seconds']} 秒\n"
             f"log（收件端機器）: {run_dir / 'output.log'}\n\n"
-            f"## 工人最後回報\n{final_text(run_dir / 'output.log')}\n\n"
-            f"## 變更\n```text\n{'(worktree 的 .git 指標被工人改過，不在裡面跑 git)' if tampered else changes(worktree, base)}\n```\n"
+            f"## 工人最後回報\n{worker_text}\n\n"
+            + (f"\n⚠ {FAKE_TOOL_WARNING}\n\n" if suspect else "")
+            + f"## 變更\n```text\n{'(worktree 的 .git 指標被工人改過，不在裡面跑 git)' if tampered else changes(worktree, base)}\n```\n"
             + (f"\n## 範圍與衝突預測\n簽出範圍：{', '.join(claim['paths'])}\n{scope_note}\n" if claim else "")
             + (f"\n## 分派（runtime auto）\n" + "\n".join(f"- {r}" for r in decision.reasons) + "\n" if decision else "")
             + ("\n## 嘗試\n" + "\n".join(f"{i + 1}. {a}" for i, a in enumerate(attempts)) + "\n" if len(attempts) > 1 else "")

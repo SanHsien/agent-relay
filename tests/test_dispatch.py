@@ -110,22 +110,22 @@ class ArgvTests(DispatchBase):
     def test_fallback_argv_is_conservative_and_uses_stdin(self):
         wt = self.worktree()
         with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
-            argv, source, stdin = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P" + NL + "line2", "s", Path("L"), wt, {})
+            argv, source, stdin = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P" + NL + "line2", "s", self.dir / "L", wt, {})
             self.assertEqual(source, "built-in")
             self.assertIn("acceptEdits", argv)
             self.assertNotIn("P" + NL + "line2", argv)
             self.assertEqual(stdin, "P" + NL + "line2")
             self.assertNotIn("--allowedTools", argv)  # no shell for a claude worker by default
-            argv, _, stdin = dispatch.build_argv({"runtime": "codex", "repo": "x", "mode": "plan"}, "P", "s", Path("L"), wt, {})
+            argv, _, stdin = dispatch.build_argv({"runtime": "codex", "repo": "x", "mode": "plan"}, "P", "s", self.dir / "L", wt, {})
             self.assertIn("read-only", argv)
             self.assertEqual(stdin, "P")
-            argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", Path("L"), wt, {})
+            argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", self.dir / "L", wt, {})
             self.assertIn("workspace-write", argv)
             # The user's codex config may widen workspace-write; relay pins it back to the worktree.
             self.assertEqual(argv[-len(dispatch.CODEX_SANDBOX_PINS):], dispatch.CODEX_SANDBOX_PINS)
             self.assertIn("sandbox_workspace_write.writable_roots=[]", argv)
             self.assertNotIn("--add-dir", argv)  # workers never get git's own directories
-            argv, _, stdin = dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", Path("L"), wt, {})
+            argv, _, stdin = dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", self.dir / "L", wt, {})
             self.assertEqual(argv[-3:], ["--mode", "plan", "--sandbox"])
             self.assertIsNone(stdin)
         for flag in ("--dangerously-skip-permissions", "bypassPermissions", "--dangerously-bypass-approvals-and-sandbox"):
@@ -135,7 +135,7 @@ class ArgvTests(DispatchBase):
     def test_cortex_builder_used_when_available(self):
         wt = self.worktree()
         cfg = {"dispatch": {"cortex_path": "C:/GitHub/agent-cortex"}}
-        argv, source, stdin = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P", "s", Path("L"), wt, cfg)
+        argv, source, stdin = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P", "s", self.dir / "L", wt, cfg)
         self.assertEqual(source, "agent-cortex")
         self.assertIn("acceptEdits", argv)
         self.assertNotIn("bypassPermissions", argv)
@@ -144,7 +144,7 @@ class ArgvTests(DispatchBase):
         self.assertEqual(stdin, "P")
         self.assertNotIn("--allowedTools", argv)
         self.assertEqual(argv.count("--add-dir"), 1)  # only the worktree, no .git directories
-        argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", Path("L"), wt, cfg)
+        argv, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", self.dir / "L", wt, cfg)
         self.assertIn("workspace-write", argv)
         self.assertEqual(argv[-len(dispatch.CODEX_SANDBOX_PINS):], dispatch.CODEX_SANDBOX_PINS)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", argv)
@@ -514,15 +514,15 @@ class Claude3pTests(DispatchBase):
         self.assertIsNone(env["ANTHROPIC_AUTH_TOKEN"])  # removed, so a login token cannot win over the gateway
         with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
             with self.assertRaisesRegex(dispatch.DispatchError, "needs a model"):
-                dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", Path("L"), self.dir, cfg)
-            cfg["dispatch"]["claude_3p"]["model"] = "claude-sonnet-4-5"
-            argv, _, stdin = dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", Path("L"), self.dir, cfg)
-        self.assertEqual((argv[0], argv[argv.index("--model") + 1], stdin), ("claude", "claude-sonnet-4-5", "P"))
+                dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+            cfg["dispatch"]["claude_3p"]["model"] = "gpt-6.1-sol"
+            argv, _, stdin = dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+        self.assertEqual((argv[0], argv[argv.index("--model") + 1], stdin), ("claude", "gpt-6.1-sol", "P"))
         self.assertNotIn("k3p", " ".join(argv))  # the key never reaches the command line
 
     def test_claude_workers_get_no_mcp_hooks_or_plugins(self):
         cfg = self.profile()
-        cfg["dispatch"]["claude_3p"]["model"] = "m"
+        cfg["dispatch"]["claude_3p"]["model"] = "gpt-6.1-sol"
         with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
             official, _, _ = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
             gateway, _, _ = dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
@@ -533,6 +533,26 @@ class Claude3pTests(DispatchBase):
             self.assertEqual(argv[argv.index("--setting-sources") + 1], "project,local")
         self.assertNotIn("--bare", official)  # the official login is OAuth, which --bare does not read
         self.assertIn("--bare", gateway)
+
+    def test_only_named_non_anthropic_models(self):
+        for ok in ("gpt-6.1-sol", "google-antigravity/gemini-3.8-flash", "cursor/gpt-5.6-sol"):
+            dispatch.check_3p_model(ok)
+        for bad in ("claude-sonnet-4-5", "anthropic/claude-fable-5", "claude-opus-4-8-p07c",  # use --run claude
+                    "cursor/kimi-k3", "openrouter/minimax/minimax-m3", "deepseek-v4",          # providers not used
+                    "combo/flagship", "cursor/auto", "cursor/auto-cost"):                      # router picks the model
+            with self.subTest(model=bad), self.assertRaises(dispatch.DispatchError):
+                dispatch.check_3p_model(bad)
+
+    def test_fake_tool_calls_in_a_report_are_flagged(self):
+        self.cfg["dispatch"]["runtimes"] = ["claude"]
+        env = self.send_task(mode="plan")
+        code = ("import json; print(json.dumps({'type': 'result', 'result': "
+                "'reading <function_calls><invoke name=\\\"bash\\\"> made-up output'}))")
+        report = self.run_fake(env, code)
+        self.assertEqual(report["warnings"], ["fake-tool-calls"])
+        reply = self.reply_for(env)
+        self.assertIn("假造的工具呼叫", reply["body"])
+        self.assertEqual(reply["result"]["warnings"], ["fake-tool-calls"])
 
     def test_run_removes_variables_set_to_none(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "login"}):

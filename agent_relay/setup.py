@@ -51,7 +51,7 @@ def worker_defaults(store: str, agent: str, repo_roots: list[str], runtimes: lis
         "daily_limit": 20,
     }
     if "claude-3p" in runtimes:
-        dispatch["claude_3p"] = {"model": "claude-sonnet-4-5-20250929"}
+        dispatch["claude_3p"] = {"model": "gpt-6.1-sol"}  # a non-Anthropic gateway subscription
     if auto:
         dispatch["default"] = {"runtime": "claude", "timeout_minutes": 30}
     return {"store": store, "agent": agent, "doorbells": [{"type": "toast"}, {"type": "dispatch"}],

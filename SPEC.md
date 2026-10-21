@@ -175,7 +175,14 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - gateway 的網址與金鑰在**執行當下**從 3P 設定檔讀取：預設是 `%LOCALAPPDATA%\Claude-3p\configLibrary\_meta.json` 裡名為 opencodex 的設定，或目前套用中的設定。也可以用 `dispatch.claude_3p.profile` 指定設定檔。
   - 讀到的值放進工人的 `ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY`，並移除 `ANTHROPIC_AUTH_TOKEN`，避免改用官方登入。金鑰不會寫進 relay 設定、信件、argv 或 log。
   - 必須指定模型：信件的 `model`，或收件端的 `dispatch.claude_3p.model`。模型 id 以 gateway 解析的結果為準，不能只看顯示名稱。
+  - **只用非 Anthropic 模型**：claude-3p 的用途，是用 gateway 上主人其他訂閱的模型，例如 OpenAI 的 `gpt-6.1-sol`、Google 的 `google-antigravity/gemini-3.8-flash`。下列三類一律回 `refused`：
+    - Claude 模型（`claude-*`、`anthropic/*`）：經 gateway 跑等於花官方額度，請改用 `--run claude`；
+    - 主人不使用的供應商：kimi、minimax、qwen、deepseek、glm 等；
+    - 由路由器自己挑模型的入口：`combo/*`、`*/auto*`，可能挑到 Claude。
+
+    `setup-local` 的預設模型是 `gpt-6.1-sol`。
   - 讀不到設定檔時回 `refused`。`runtime auto`、改派、升級都不會選它，因為它的額度查不到，必須明寫 `--run claude-3p`。
+- **假造的工具呼叫**：工人的回報裡若出現用文字寫出的工具呼叫標記，例如 `<function_calls>`、`<invoke name=`，表示它可能沒有真的讀檔、自己編了輸出。實測 claude-3p 曾發生一次。回信會加上警告，`result.warnings` 為 `["fake-tool-calls"]`；唯讀工單的 prompt 也會要求先用工具讀實際檔案，結論附檔名與行號。
 - **claude 工人的隔離**（`claude` 與 `claude-3p` 都適用）：
   - 加上 `--strict-mcp-config --mcp-config <空清單>`：工人拿不到主人的 MCP 伺服器。實測曾看到工人試著呼叫主人的 GitHub、爬網、搜尋 MCP。
   - 加上 `--setting-sources project,local`：不載入主人使用者層的 hooks 與 plugins。
