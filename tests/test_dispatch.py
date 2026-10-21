@@ -495,6 +495,43 @@ class LimitTests(DispatchBase):
         self.assertEqual(self.replies_for(env), [])
 
 
+class Claude3pTests(DispatchBase):
+    """The claude CLI pointed at the Claude Desktop 3P gateway."""
+
+    def profile(self):
+        lib = self.dir / "configLibrary"
+        lib.mkdir()
+        (lib / "_meta.json").write_text(json.dumps({"appliedId": "a", "entries": [
+            {"id": "a", "name": "Default"}, {"id": "b", "name": "opencodex"}]}), encoding="utf-8")
+        (lib / "b.json").write_text(json.dumps({"inferenceGatewayBaseUrl": "http://127.0.0.1:10100",
+                                                "inferenceGatewayApiKey": "k3p"}), encoding="utf-8")
+        return {"dispatch": {"claude_3p": {"profile": str(lib / "_meta.json")}}}
+
+    def test_gateway_env_and_argv(self):
+        cfg = self.profile()
+        env = dispatch.worker_env({"runtime": "claude-3p"}, self.dir, self.dir, "h", cfg)
+        self.assertEqual((env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_API_KEY"]), ("http://127.0.0.1:10100", "k3p"))
+        self.assertIsNone(env["ANTHROPIC_AUTH_TOKEN"])  # removed, so a login token cannot win over the gateway
+        with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
+            with self.assertRaisesRegex(dispatch.DispatchError, "needs a model"):
+                dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", Path("L"), self.dir, cfg)
+            cfg["dispatch"]["claude_3p"]["model"] = "claude-sonnet-4-5"
+            argv, _, stdin = dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", Path("L"), self.dir, cfg)
+        self.assertEqual((argv[0], argv[argv.index("--model") + 1], stdin), ("claude", "claude-sonnet-4-5", "P"))
+        self.assertNotIn("k3p", " ".join(argv))  # the key never reaches the command line
+
+    def test_run_removes_variables_set_to_none(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "login"}):
+            log = self.dir / "env.log"
+            dispatch.run([sys.executable, "-c", "import os; print(os.environ.get('ANTHROPIC_AUTH_TOKEN'))"],
+                         self.dir, log, 60, extra_env={"ANTHROPIC_AUTH_TOKEN": None})
+        self.assertEqual(log.read_text(encoding="utf-8").strip(), "None")
+
+    def test_missing_profile_is_a_refusal(self):
+        with self.assertRaises(dispatch.DispatchError):
+            dispatch.gateway_settings({"dispatch": {"claude_3p": {"profile": str(self.dir / "nope.json")}}})
+
+
 class ExecutableTests(DispatchBase):
     def test_batch_shim_refused(self):
         shim = self.dir / "claude.cmd"

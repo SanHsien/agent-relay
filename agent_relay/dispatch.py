@@ -42,7 +42,7 @@ from .procs import pid_alive
 from .store import Store
 from . import procs
 
-RUNTIMES = ("claude", "codex", "agy", "hermes")
+RUNTIMES = ("claude", "claude-3p", "codex", "agy", "hermes")
 MODES = ("build", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh")
 BASE_RE = re.compile(r"[0-9a-f]{40}")  # full sha only: a short prefix can be brute-forced by anyone who can push to origin
@@ -319,6 +319,12 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
     model = spec.get("model")
+    if runtime == "claude-3p":
+        # The same Claude Code CLI, only pointed at the 3P gateway (worker_env); needs a gateway model id.
+        model = model or (cfg.get("dispatch") or {}).get("claude_3p", {}).get("model")
+        if not model:
+            raise DispatchError("claude-3p needs a model: dispatch.model, or dispatch.claude_3p.model on this machine")
+        runtime, spec = "claude", {**spec, "model": model}
     if runtime == "hermes":
         return build_hermes_argv(spec, prompt, log_dir, worktree), "built-in", None
     tools = list((cfg.get("dispatch") or {}).get("claude_allowed_tools") or DEFAULT_CLAUDE_TOOLS)
@@ -383,9 +389,43 @@ def build_hermes_argv(spec: dict, prompt: str, log_dir: Path, worktree: Path) ->
     return argv
 
 
-def worker_env(spec: dict, worktree: Path, run_dir: Path, holder: str) -> dict:
-    """Extra environment for the worker process."""
+DEFAULT_3P_PROFILE = r"%LOCALAPPDATA%\Claude-3p\configLibrary\_meta.json"
+
+
+def gateway_settings(cfg: dict) -> tuple[str, str]:
+    """(base url, api key) of the Claude Desktop 3P gateway profile, read at run time.
+
+    The key stays in the Desktop's own profile file; relay never copies it into its
+    config, the envelope, argv or any log. dispatch.claude_3p.profile may name the
+    profile JSON directly; by default the profile _meta.json marks as applied is used,
+    or the one named opencodex.
+    """
+    conf = (cfg.get("dispatch") or {}).get("claude_3p") or {}
+    path = Path(os.path.expandvars(conf.get("profile") or DEFAULT_3P_PROFILE))
+    try:
+        if path.name == "_meta.json":
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            entries = meta.get("entries") or []
+            chosen = next((e for e in entries if e.get("name") == "opencodex"), None) or \
+                next((e for e in entries if e.get("id") == meta.get("appliedId")), None)
+            if not chosen:
+                raise DispatchError(f"no opencodex / applied profile in {path}")
+            path = path.with_name(f"{chosen['id']}.json")
+        profile = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise DispatchError(f"claude-3p: cannot read the 3P profile {path}: {exc}") from exc
+    base, key = profile.get("inferenceGatewayBaseUrl"), profile.get("inferenceGatewayApiKey")
+    if not (isinstance(base, str) and base and isinstance(key, str) and key):
+        raise DispatchError(f"claude-3p: {path} has no gateway base URL and key")
+    return base, key
+
+
+def worker_env(spec: dict, worktree: Path, run_dir: Path, holder: str, cfg: dict | None = None) -> dict:
+    """Extra environment for the worker process (a None value removes the variable)."""
     extra = {"AGENT_RELAY_HOLDER": holder}
+    if spec["runtime"] == "claude-3p":
+        base, key = gateway_settings(cfg or {})
+        extra.update(ANTHROPIC_BASE_URL=base, ANTHROPIC_API_KEY=key, ANTHROPIC_AUTH_TOKEN=None)
     if spec["runtime"] == "hermes":
         # Hermes refuses writes outside these roots. A plan run gets an empty directory
         # of its own, so the worktree itself is read-only to it.
@@ -484,7 +524,9 @@ def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: 
         extra_env: dict | None = None) -> tuple[str, int | None]:
     """Run argv (argv[0] already resolved) with a hard timeout. Returns (status, exit code)."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, **(extra_env or {})}
+    env = {**os.environ, **{k: v for k, v in (extra_env or {}).items() if v is not None}}
+    for name in [k for k, v in (extra_env or {}).items() if v is None]:
+        env.pop(name, None)
     with open(log_file, "w", encoding="utf-8", errors="replace") as log:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT,
                                 stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
@@ -1041,12 +1083,13 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                     if (run_dir / "argv.json").is_file():
                         shutil.copyfile(run_dir / "argv.json", run_dir / f"argv.{len(attempts)}.json")
                 argv, source, stdin_text = build_argv(spec, prompt, f"relay-{env_id}", run_dir, worktree, cfg)
-                argv = [resolve_executable(spec["runtime"], cfg), *argv[1:]]
+                argv = [resolve_executable("claude" if spec["runtime"] == "claude-3p" else spec["runtime"], cfg),
+                        *argv[1:]]
                 # The exact command (prompt left out): the reply's proof of which sandbox the worker had.
                 shown = ["<prompt>" if a == prompt else a for a in argv]
                 (run_dir / "argv.json").write_text(json.dumps(shown, ensure_ascii=False), encoding="utf-8")
                 status, code = run(argv, worktree, run_dir / "output.log", timeout_s, stdin_text,
-                                   extra_env=worker_env(spec, worktree, run_dir, holder))
+                                   extra_env=worker_env(spec, worktree, run_dir, holder, cfg))
                 failure = classify_failure(run_dir / "output.log") if status == "failed" else None
                 if spec["runtime"] == "hermes":
                     usage = hermes_usage(run_dir)

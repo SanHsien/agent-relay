@@ -124,7 +124,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| `runtime` | 是 | `claude`、`codex`、`agy`、`hermes` |
+| `runtime` | 是 | `claude`、`claude-3p`、`codex`、`agy`、`hermes` |
 | `repo` | 是 | 收件端機器上的 git repo 路徑，或 `asr:<會話名>` |
 | `mode` | 否 | `build`（預設，工人改 worktree 裡的檔，relay 事後替它 commit）或 `plan`（唯讀） |
 | `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
@@ -171,6 +171,11 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - **中斷補救**：開跑時寫 `~/.agent-relay/runs/<id>/state.json`（含期限 = 逾時 + 10 分鐘）。分頁被關、當機或重開機時，信會停在 `cur/`；下一輪 `watch` 看到期限已過、還沒回信，就補一封 `status: interrupted` 並 ack，並立刻同步出去。門鈴響了卻一直沒啟動（沒有 state.json，超過 30 分鐘）的信，在有設 dispatch 門鈴時也一樣補回信。補救時某一封出錯只記 log、跳過，不會讓整個 watch 停掉。
 - 已 `done` 的信不會再派；要重跑加 `relay dispatch <id> --force`。worktree 已存在時，只沿用 git 登記為 `relay/<id>` 的那個 worktree，diff 以該分支的 merge-base 為準；路徑上若是別的資料夾就拒絕。
 - 已知範圍：worktree 之間共用同一個 repo 的物件庫，但工人拿不到 `.git` 目錄的寫入權，commit 一律由 relay 做。
+- **claude-3p**：同一個 Claude Code CLI，改經 Claude Desktop 3P 的 gateway（例如本機 opencodex，`127.0.0.1:10100`）呼叫模型。權限、prompt 走 stdin、不給 shell 等規則都和 `claude` 相同。
+  - gateway 的網址與金鑰在**執行當下**從 3P 設定檔讀取：預設是 `%LOCALAPPDATA%\Claude-3p\configLibrary\_meta.json` 裡名為 opencodex 的設定，或目前套用中的設定。也可以用 `dispatch.claude_3p.profile` 指定設定檔。
+  - 讀到的值放進工人的 `ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY`，並移除 `ANTHROPIC_AUTH_TOKEN`，避免改用官方登入。金鑰不會寫進 relay 設定、信件、argv 或 log。
+  - 必須指定模型：信件的 `model`，或收件端的 `dispatch.claude_3p.model`。模型 id 以 gateway 解析的結果為準，不能只看顯示名稱。
+  - 讀不到設定檔時回 `refused`。`runtime auto`、改派、升級都不會選它，因為它的額度查不到，必須明寫 `--run claude-3p`。
 - **hermes**（Hermes Windows desktop 版 CLI）：`hermes.exe -z <短指令> --in <worktree> -t file --usage-file runs/<id>/hermes-usage.json`，可加 `-m`、`--reasoning`。
   - 單次模式 `-z` **會自動略過核可**，所以安全只靠兩道限制：工具組只給 `file`（`read_file`／`write_file`／`patch`／`search_files`，沒有 terminal 和程式執行）；環境變數 `HERMES_WRITE_SAFE_ROOT` 設為 worktree，寫到 worktree 外會被 Hermes 拒絕。plan 模式把寫入根目錄設成 run 目錄下的空資料夾，worktree 對它是唯讀。
   - **讀取不受限**：寫入根目錄只管寫，`read_file`／`search_files` 只擋 Hermes 自己的憑證與 `.env`。工人讀得到 `~/.ssh`、其他 repo 和 relay store；被 prompt injection 時，它能把讀到的東西寫進 worktree，經 relay commit 後進入回信的 git 歷史。codex 的 `workspace-write` 也有同類風險。只對信任的寄件者放行 hermes。
