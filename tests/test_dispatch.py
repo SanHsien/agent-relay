@@ -520,6 +520,20 @@ class Claude3pTests(DispatchBase):
         self.assertEqual((argv[0], argv[argv.index("--model") + 1], stdin), ("claude", "claude-sonnet-4-5", "P"))
         self.assertNotIn("k3p", " ".join(argv))  # the key never reaches the command line
 
+    def test_claude_workers_get_no_mcp_hooks_or_plugins(self):
+        cfg = self.profile()
+        cfg["dispatch"]["claude_3p"]["model"] = "m"
+        with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
+            official, _, _ = dispatch.build_argv({"runtime": "claude", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+            gateway, _, _ = dispatch.build_argv({"runtime": "claude-3p", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+        for argv in (official, gateway):
+            self.assertIn("--strict-mcp-config", argv)
+            self.assertEqual(json.loads(Path(argv[argv.index("--mcp-config") + 1]).read_text(encoding="utf-8")),
+                             {"mcpServers": {}})
+            self.assertEqual(argv[argv.index("--setting-sources") + 1], "project,local")
+        self.assertNotIn("--bare", official)  # the official login is OAuth, which --bare does not read
+        self.assertIn("--bare", gateway)
+
     def test_run_removes_variables_set_to_none(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "login"}):
             log = self.dir / "env.log"

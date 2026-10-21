@@ -176,6 +176,10 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - 讀到的值放進工人的 `ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY`，並移除 `ANTHROPIC_AUTH_TOKEN`，避免改用官方登入。金鑰不會寫進 relay 設定、信件、argv 或 log。
   - 必須指定模型：信件的 `model`，或收件端的 `dispatch.claude_3p.model`。模型 id 以 gateway 解析的結果為準，不能只看顯示名稱。
   - 讀不到設定檔時回 `refused`。`runtime auto`、改派、升級都不會選它，因為它的額度查不到，必須明寫 `--run claude-3p`。
+- **claude 工人的隔離**（`claude` 與 `claude-3p` 都適用）：
+  - 加上 `--strict-mcp-config --mcp-config <空清單>`：工人拿不到主人的 MCP 伺服器。實測曾看到工人試著呼叫主人的 GitHub、爬網、搜尋 MCP。
+  - 加上 `--setting-sources project,local`：不載入主人使用者層的 hooks 與 plugins。
+  - claude-3p 另外加 `--bare`：不載入 CLAUDE.md、不使用自動記憶。官方 claude 不能用 `--bare`，因為它靠 OAuth 登入，而 `--bare` 不讀 OAuth；所以官方 claude 工人仍會載入全域 CLAUDE.md。
 - **hermes**（Hermes Windows desktop 版 CLI）：`hermes.exe -z <短指令> --in <worktree> -t file --usage-file runs/<id>/hermes-usage.json`，可加 `-m`、`--reasoning`。
   - 單次模式 `-z` **會自動略過核可**，所以安全只靠兩道限制：工具組只給 `file`（`read_file`／`write_file`／`patch`／`search_files`，沒有 terminal 和程式執行）；環境變數 `HERMES_WRITE_SAFE_ROOT` 設為 worktree，寫到 worktree 外會被 Hermes 拒絕。plan 模式把寫入根目錄設成 run 目錄下的空資料夾，worktree 對它是唯讀。
   - **讀取不受限**：寫入根目錄只管寫，`read_file`／`search_files` 只擋 Hermes 自己的憑證與 `.env`。工人讀得到 `~/.ssh`、其他 repo 和 relay store；被 prompt injection 時，它能把讀到的東西寫進 worktree，經 relay commit 後進入回信的 git 歷史。codex 的 `workspace-write` 也有同類風險。只對信任的寄件者放行 hermes。

@@ -339,7 +339,8 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
     model = spec.get("model")
-    if runtime == "claude-3p":
+    is_3p = runtime == "claude-3p"
+    if is_3p:
         # The same Claude Code CLI, only pointed at the 3P gateway (worker_env); needs a gateway model id.
         model = model or (cfg.get("dispatch") or {}).get("claude_3p", {}).get("model")
         if not model:
@@ -357,7 +358,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
             argv = [a for a in argv if a != "--remote-control"]
             if tools and not plan:
                 argv += ["--allowedTools", *tools]
-            return _prompt_to_stdin(argv, prompt), "agent-cortex", prompt
+            return _prompt_to_stdin(argv, prompt) + claude_isolation(log_dir, is_3p), "agent-cortex", prompt
         if runtime == "codex":
             argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
                                              effort=spec.get("effort"), **common)
@@ -368,6 +369,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
                 "--permission-mode", "plan" if plan else "acceptEdits", "--add-dir", str(worktree)]
         if tools and not plan:
             argv += ["--allowedTools", *tools]
+        argv += claude_isolation(log_dir, is_3p)
         stdin = prompt
     elif runtime == "codex":
         argv = ["codex", "exec", "--json", "--sandbox", "read-only" if plan else "workspace-write",
@@ -381,6 +383,23 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     if model:
         argv += ["--model", model]
     return argv, "built-in", stdin
+
+
+def claude_isolation(log_dir: Path, bare: bool) -> list[str]:
+    """Run a claude worker without the owner's MCP servers, hooks and plugins.
+
+    Found live: a worker inherited the owner's MCP tools (a GitHub server that can
+    write, a web scraper, a search index) and the owner's habits (a plan run went off
+    to write a plan file instead of answering). No MCP server at all, and only project
+    and local settings. A 3P worker authenticates with an API key, so it can run
+    --bare (no hooks, no CLAUDE.md, no auto-memory); the official login needs OAuth,
+    which --bare does not read, so the official worker keeps the global CLAUDE.md.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    empty = log_dir / "mcp-empty.json"
+    empty.write_text('{"mcpServers": {}}', encoding="utf-8")
+    flags = ["--strict-mcp-config", "--mcp-config", str(empty), "--setting-sources", "project,local"]
+    return flags + (["--bare"] if bare else [])
 
 
 HERMES_TOOLSETS = "file"  # read_file, write_file, patch, search_files: no terminal, no code execution
