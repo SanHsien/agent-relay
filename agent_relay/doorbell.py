@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config
+from . import procs
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 KEEP_RUNG = 1000
@@ -68,7 +69,7 @@ def _log(line: str) -> None:
 def ring_toast(env: dict, bell: dict) -> str:
     if sys.platform != "win32":
         return "skipped: toast is Windows-only"
-    proc = subprocess.run(
+    proc = procs.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _TOAST_PS],
         env={**os.environ, "RELAY_TITLE": f"agent-relay: mail for {env['to']}", "RELAY_BODY": summary(env)},
         capture_output=True,
@@ -92,7 +93,7 @@ def ring_command(env: dict, bell: dict) -> str:
         raise ValueError("command doorbell refuses .bat/.cmd programs")
     values = fields(env)
     filled = [str(arg).format_map(values) for arg in argv]
-    proc = subprocess.run(
+    proc = procs.run(
         filled,
         capture_output=True,
         text=True,

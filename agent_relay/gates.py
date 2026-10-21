@@ -31,6 +31,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import procs
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -143,7 +145,7 @@ def _stub_functions(source: str) -> dict[str, str]:
 
 
 def _base_source(worktree: Path, base: str, rel: str) -> str:
-    proc = subprocess.run(["git", "-C", str(worktree), *SAFE_GIT, "show", f"{base}:{rel}"],
+    proc = procs.run(["git", "-C", str(worktree), *SAFE_GIT, "show", f"{base}:{rel}"],
                           capture_output=True, timeout=60, check=False)
     return proc.stdout.decode("utf-8", errors="replace") if proc.returncode == 0 else ""
 
@@ -172,7 +174,7 @@ def find_stubs(worktree: Path, changed: list[str], base: str | None = None, test
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+        procs.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
     else:
         proc.kill()
 
@@ -216,15 +218,15 @@ def run_logged(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> di
 
 
 def _scratch_worktree(repo: Path, base: str, path: Path) -> None:
-    subprocess.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "prune"], capture_output=True, check=False, timeout=60)
+    procs.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "prune"], capture_output=True, check=False, timeout=60)
     if path.exists():
         shutil.rmtree(path, ignore_errors=True)
-    subprocess.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "add", "--quiet", "--force", "--detach", str(path), base],
+    procs.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "add", "--quiet", "--force", "--detach", str(path), base],
                    capture_output=True, check=True, timeout=120)
 
 
 def _drop_worktree(repo: Path, path: Path, notes: list[str]) -> None:
-    proc = subprocess.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "remove", "--force", str(path)],
+    proc = procs.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "remove", "--force", str(path)],
                           capture_output=True, check=False, timeout=120)
     if proc.returncode != 0:
         notes.append(f"暫時 worktree 沒能移除：{path}（下次會先 prune）")

@@ -21,6 +21,7 @@ from . import status as relay_status
 from . import accept as accepter
 from . import dispatch as dispatcher
 from .store import Store, StoreError
+from . import procs
 
 
 def _out(args: argparse.Namespace, data, text: str) -> None:
@@ -64,7 +65,7 @@ def _full_sha(ref: str) -> str:
         return ref.lower()
     import subprocess
 
-    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}"],
+    proc = procs.run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options", ref + "^{commit}"],
                           capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise SystemExit(f"--base {ref!r} is not a commit in the current repository; pass a full 40-char sha")

@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from .procs import pid_alive
+from . import procs
 
 PUSH_RETRIES = 3
 TIMEOUT = 120
@@ -99,7 +100,7 @@ def _release(lock: Path, token: str) -> None:
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     try:
-        proc = subprocess.run(
+        proc = procs.run(
             ["git", "-C", str(root), *args],
             capture_output=True,
             text=True,
@@ -190,7 +191,7 @@ def push(root: Path) -> None:
 def clone(url: str, dest: Path, branch: str) -> None:
     """Clone only the mailbox branch of the store repository."""
     try:
-        proc = subprocess.run(
+        proc = procs.run(
             ["git", "clone", "--quiet", "--single-branch", "--branch", branch, url, str(dest)],
             capture_output=True, text=True, errors="replace", timeout=300, check=False,
         )

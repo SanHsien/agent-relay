@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import config, envelope, gates, gitsync, locks, signing
 from .store import Store
+from . import procs
 
 SHA_LEN = 40
 
@@ -26,7 +27,7 @@ class AcceptError(RuntimeError):
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(["git", "-C", str(repo), *gates.SAFE_GIT, *args], capture_output=True, text=True,
+    proc = procs.run(["git", "-C", str(repo), *gates.SAFE_GIT, *args], capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=300, check=False)
     if check and proc.returncode != 0:
         raise AcceptError(f"git {' '.join(args)}: {(proc.stderr or proc.stdout).strip()}")
@@ -70,7 +71,7 @@ def check_reply(env: dict, cfg: dict) -> dict:
 
 
 def _is_ancestor(repo: Path, older: str, newer: str) -> bool:
-    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
+    return procs.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer],
                           capture_output=True, check=False, timeout=120).returncode == 0
 
 
@@ -168,7 +169,7 @@ def merge_and_verify(repo: Path, head: str, commit: str, message: str, command: 
         except subprocess.CalledProcessError as exc:
             raise AcceptError(f"could not create a verification worktree: {exc.stderr!r}") from exc
         try:
-            proc = subprocess.run(["git", "-C", str(scratch), *gates.SAFE_GIT, "merge", "--no-ff", "--no-edit",
+            proc = procs.run(["git", "-C", str(scratch), *gates.SAFE_GIT, "merge", "--no-ff", "--no-edit",
                                    "-m", message, commit], capture_output=True, text=True, encoding="utf-8",
                                   errors="replace", check=False, timeout=300)
             if proc.returncode != 0:

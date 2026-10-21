@@ -27,6 +27,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import procs
+
 CLAIM_SCHEMA = "agent-relay/claim@1"
 AUDIT_SCHEMA = "agent-relay/audit@1"
 WILDCARDS = set("*?[")
@@ -108,7 +110,7 @@ def validate_paths(paths: object) -> list[str]:
 
 def _git(repo: Path, *args: str) -> str | None:
     try:
-        proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+        proc = procs.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=20, check=False)
     except (subprocess.SubprocessError, OSError):
         return None

@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from . import procs
+
 TASK_PREFIX = "agent-relay-watch-"
 
 _TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
@@ -86,7 +88,7 @@ def build_task_xml(agent: str, minutes: int, command: str, workdir: str) -> str:
 
 
 def _schtasks(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return procs.run(
         ["schtasks", *args], capture_output=True, text=True, errors="replace", timeout=30, check=False
     )
 

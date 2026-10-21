@@ -25,6 +25,7 @@ import time
 from pathlib import Path
 
 from . import config
+from . import procs
 
 SECTION_CHARS = 4000
 TOTAL_CHARS = 14000
@@ -105,7 +106,7 @@ def _run(argv: list[str], clock: _Clock, cwd: Path | None = None) -> str | None:
     if timeout is None:
         return None
     try:
-        proc = subprocess.run(argv, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+        proc = procs.run(argv, cwd=str(cwd) if cwd else None, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=timeout, check=False)
     except (subprocess.SubprocessError, OSError):
         return None

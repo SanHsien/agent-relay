@@ -40,6 +40,7 @@ from . import advisor, config, context, doorbell, envelope, gates, gitsync, lock
 from .context import redact
 from .procs import pid_alive
 from .store import Store
+from . import procs
 
 RUNTIMES = ("claude", "codex", "agy", "hermes")
 MODES = ("build", "plan")
@@ -206,7 +207,7 @@ def policy_check(env: dict, spec: dict, policy: dict, allowed_signers: Path | No
 
 def _git(cwd: Path, *args: str) -> str:
     try:
-        proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+        proc = procs.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
                               encoding="utf-8", errors="replace", timeout=120, check=False)
     except (subprocess.SubprocessError, OSError) as exc:
         raise DispatchError(f"git {' '.join(args)}: {exc}") from exc
@@ -474,7 +475,7 @@ def resolve_executable(name: str, cfg: dict) -> str:
 
 def _kill_tree(proc: subprocess.Popen) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
+        procs.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, check=False)
     else:
         proc.kill()
 

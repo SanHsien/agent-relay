@@ -25,6 +25,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import procs
+
 FIVE_HOUR_LIMIT = 90.0
 WEEKLY_LIMIT = 95.0
 
@@ -154,7 +156,7 @@ def codex_quota(command: list[str] | None, now: float | None = None, timeout: fl
         return Quota("codex")
     now = now or time.time()
     try:
-        proc = subprocess.run([*command, "--json"], capture_output=True, text=True, encoding="utf-8",
+        proc = procs.run([*command, "--json"], capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=timeout, check=False)
         data = _dict(json.loads(proc.stdout)) if proc.returncode == 0 else None
     except (subprocess.SubprocessError, OSError, ValueError):

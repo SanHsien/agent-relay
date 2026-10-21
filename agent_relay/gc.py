@@ -19,6 +19,7 @@ from pathlib import Path
 
 from . import config, dispatch
 from .store import Store
+from . import procs
 
 DEFAULT_DAYS = 14
 
@@ -28,7 +29,7 @@ class GcError(RuntimeError):
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(repo), "-c", "core.hooksPath=" + os.devnull, *args],
+    return procs.run(["git", "-C", str(repo), "-c", "core.hooksPath=" + os.devnull, *args],
                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False)
 
 

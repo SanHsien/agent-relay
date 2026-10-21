@@ -17,6 +17,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from . import procs
+
 NAMESPACE = "agent-relay"
 SIG_FIELD = "sig"
 TIMEOUT = 30
@@ -41,7 +43,7 @@ def _ssh_keygen() -> str:
 
 def _run(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run([_ssh_keygen(), *args], input=stdin, capture_output=True, timeout=TIMEOUT,
+        return procs.run([_ssh_keygen(), *args], input=stdin, capture_output=True, timeout=TIMEOUT,
                               stdin=None if stdin is not None else subprocess.DEVNULL)
     except subprocess.TimeoutExpired as exc:
         raise SigningError(f"ssh-keygen timed out: {' '.join(args[:2])}") from exc
