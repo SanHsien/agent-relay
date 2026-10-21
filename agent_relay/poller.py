@@ -63,6 +63,9 @@ _TASK_XML = """<?xml version="1.0" encoding="UTF-16"?>
 """
 
 
+DEFAULT_HOME = Path.home() / ".agent-relay"
+
+
 def task_name(agent: str) -> str:
     return TASK_PREFIX + agent
 
@@ -74,7 +77,7 @@ def interpreter() -> str:
     return str(windowless if windowless.is_file() else exe)
 
 
-def build_task_xml(agent: str, minutes: int, command: str, workdir: str) -> str:
+def build_task_xml(agent: str, minutes: int, command: str, workdir: str, home: Path | None = None) -> str:
     if not 1 <= minutes <= 1440:
         raise ValueError("minutes must be between 1 and 1440")
     return _TASK_XML.format(
@@ -82,7 +85,8 @@ def build_task_xml(agent: str, minutes: int, command: str, workdir: str) -> str:
         start=datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         minutes=minutes,
         command=escape(command),
-        arguments=escape(f"-m agent_relay watch --agent {agent} --once"),
+        arguments=escape(f"-m agent_relay watch --agent {agent} --once"
+                         + (f' --home "{home}"' if home is not None and Path(home) != DEFAULT_HOME else "")),
         workdir=escape(workdir),
     )
 
@@ -93,9 +97,9 @@ def _schtasks(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def install(agent: str, minutes: int) -> str:
+def install(agent: str, minutes: int, home: Path | None = None) -> str:
     workdir = str(Path(__file__).resolve().parent.parent)
-    xml = build_task_xml(agent, minutes, interpreter(), workdir)
+    xml = build_task_xml(agent, minutes, interpreter(), workdir, home)
     fd, path = tempfile.mkstemp(suffix=".xml")
     os.close(fd)
     try:

@@ -363,7 +363,7 @@ def cmd_watch(args, cfg) -> int:
 def cmd_poller(args, cfg) -> int:
     agent = _agent(args, cfg)
     if args.action == "install":
-        print(f"registered scheduled task {poller.install(agent, args.every)} (every {args.every} min)")
+        print(f"registered scheduled task {poller.install(agent, args.every, config.home())} (every {args.every} min)")
     else:
         print("removed" if poller.uninstall(agent) else "no such task")
     return 0
@@ -444,7 +444,6 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("dispatch", help="run a dispatch task in a worktree and reply with the result")
     s.add_argument("id")
     s.add_argument("--agent")
-    s.add_argument("--home", help="relay home folder (the doorbell passes it; a new tab may not inherit env)")
     s.add_argument("--store", help="store folder override")
     s.add_argument("--force", action="store_true", help="run a task that is already done")
     s.set_defaults(func=cmd_dispatch)
@@ -509,6 +508,9 @@ def parser() -> argparse.ArgumentParser:
     for s in sub.choices.values():
         s.add_argument("--json", action="store_true")
         s.add_argument("--no-sync", action="store_true", help="skip git pull/push")
+        # Several relay homes can live on one machine (a commander and a worker); a scheduled task
+        # or a new terminal tab does not inherit AGENT_RELAY_HOME, so it is passed explicitly.
+        s.add_argument("--home", help="relay home folder (default: AGENT_RELAY_HOME or ~/.agent-relay)")
     return p
 
 

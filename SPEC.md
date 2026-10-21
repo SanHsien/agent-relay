@@ -95,7 +95,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 ## 5. 輪詢排程（Windows）
 
-`relay poller install --agent <name> --every 5` 註冊 Windows 排程工作 `agent-relay-watch-<name>`，每 5 分鐘跑一次 `watch --once`。用 XML 註冊才能設 `StartWhenAvailable`：睡眠或關機錯過的那一輪，開機後會補跑（做法沿用 [agentdeck](https://github.com/SanHsien/agentdeck) 的自動續跑排程）。
+`relay poller install --agent <name> --every 5` 註冊 Windows 排程工作 `agent-relay-watch-<name>`，每 5 分鐘跑一次 `watch --once`。同一台機器可以有好幾個 relay home，例如指揮者用 `~/.agent-relay`，收件工人用 `~/.agent-relay-worker`。所有指令都接受 `--home`；用非預設 home 註冊的排程會自動帶上 `--home`，因為排程和新分頁都不會繼承環境變數。用 XML 註冊才能設 `StartWhenAvailable`：睡眠或關機錯過的那一輪，開機後會補跑（做法沿用 [agentdeck](https://github.com/SanHsien/agentdeck) 的自動續跑排程）。
 
 ## 6. 派工信的內文慣例
 
@@ -315,6 +315,15 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
 ```
 
 - `command` 可以寫 `"loop-policy"`：沿用 repo 自己的 `loop-policy.toml` `[verification].quick_gate`（[ai-quality-gates](https://github.com/SanHsien/ai-quality-gates) 的格式）。
+- `command` 也可以寫 `"auto"`，依序採用：
+  1. `loop-policy.toml`；
+  2. `tests/` 底下有 `test_*.py`：`python -m unittest discover -s tests`；
+  3. `package.json` 有真正的 `test` script（不是 npm 預設的佔位指令）：`npm test --silent`；
+  4. 有 `go.mod`：`go test ./...`。
+
+  都不符合就沒有閘門。一台機器管很多 repo 時用這個。
+- `by_repo`：例如 `{"by_repo": {"harness-guard": ["python", "tests/run-tests.py"]}}`，用 repo 資料夾名稱指定那個 repo 的指令，優先於 `command`。
+- 上面三種判斷都只讀**主工作目錄**的檔案，不讀工人的分支，所以工人改不了驗證方式。
 - `require_verification: true` 時，沒有設定閘門就回 `unverified`（不 commit）；信件要求 TDD 但收件端沒設閘門也一樣。沒設這些時閘門是關的，行為和以前一樣。
 - 閘門會執行工人寫的測試程式，等同你自己手動跑測試；只對信任的寄件者與 repo 開啟。
 - 開了閘門（或要求 TDD）而工人沒有正常結束（failed／timeout）時，relay 不 commit 半成品。
@@ -397,7 +406,7 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 }
 ```
 
-- 沒設 `accept.verify.command` 就拒絕合併，不合併沒驗證過的成果。`"loop-policy"` 讀的是指揮者 clone 主工作目錄的 `loop-policy.toml`，不是分支裡的那份。
+- 沒設 `accept.verify.command` 就拒絕合併，不合併沒驗證過的成果。`accept.verify` 與收件端一樣接受 `"auto"`、`"loop-policy"`、`by_repo`（讀的是指揮者 clone 的主工作目錄）。`"loop-policy"` 讀的是指揮者 clone 主工作目錄的 `loop-policy.toml`，不是分支裡的那份。
 - 驗證的是「目前分支＋成果」的合併結果，不只是分支本身：派工送出後，目標分支可能已經往前走。驗證在暫時 worktree 跑，log 存在 `~/.agent-relay/accepts/<回信 id>/verify-*.log`，連同 sha256 寫進 audit 和給收件端的 note。
 - 合併訊息是 `relay accept: relay/<id> (reply <回信 id>)`。合併有衝突時回報 rejected，主 repo 不受影響。
 - 主 repo 只做 fast-forward，不會產生新的合併 commit，所以合進來的就是驗證過的那個 commit。暫時 worktree 裡的合併會關掉 hooks。

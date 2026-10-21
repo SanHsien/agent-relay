@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import os
 import shlex
 import shutil
@@ -64,9 +65,38 @@ class GateResult:
 # ---------------------------------------------------------------- configuration
 
 
+def detect_command(repo: Path) -> list[str] | None:
+    """A verification command guessed from the MAIN checkout's own files (never the worker's branch)."""
+    from_policy = verify_command(repo, {"command": "loop-policy"}) if (repo / "loop-policy.toml").is_file() else None
+    if from_policy:
+        return from_policy
+    tests = repo / "tests"
+    if tests.is_dir() and any(tests.rglob("test_*.py")):
+        return ["python", "-m", "unittest", "discover", "-s", "tests"]
+    try:
+        scripts = json.loads((repo / "package.json").read_text(encoding="utf-8")).get("scripts") or {}
+    except (OSError, ValueError, AttributeError):
+        scripts = {}
+    test_script = scripts.get("test") if isinstance(scripts, dict) else None
+    if isinstance(test_script, str) and test_script.strip() and "no test specified" not in test_script:
+        return ["npm", "test", "--silent"]
+    if (repo / "go.mod").is_file():
+        return ["go", "test", "./..."]
+    return None
+
+
 def verify_command(repo: Path, settings: dict) -> list[str] | None:
-    """The receiver's command: dispatch.verify.command, or the MAIN repo's loop-policy quick_gate."""
+    """The command for this repo: verify.by_repo[<folder name>], else verify.command.
+
+    verify.command may be a command (list or string), "loop-policy" (the MAIN repo's
+    quick_gate), or "auto" (loop-policy, then tests/, package.json, go.mod).
+    """
+    by_repo = settings.get("by_repo")
+    if isinstance(by_repo, dict) and Path(repo).name in by_repo:
+        settings = {**settings, "command": by_repo[Path(repo).name]}
     command = settings.get("command")
+    if command == "auto":
+        return detect_command(Path(repo))
     if command == "loop-policy":
         if tomllib is None:
             return None

@@ -55,6 +55,27 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(gates.verify_command(Path("."), {"command": ["a", "b"]}), ["a", "b"])
         self.assertIsNone(gates.verify_command(Path("."), {}))
 
+    def test_auto_and_by_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "demo"
+            repo.mkdir()
+            auto = {"command": "auto"}
+            self.assertIsNone(gates.verify_command(repo, auto))  # nothing to go on: no gate
+            (repo / "go.mod").write_text("module x\n", encoding="utf-8")
+            self.assertEqual(gates.verify_command(repo, auto), ["go", "test", "./..."])
+            (repo / "package.json").write_text('{"scripts": {"test": "echo \\"Error: no test specified\\" && exit 1"}}',
+                                               encoding="utf-8")
+            self.assertEqual(gates.verify_command(repo, auto), ["go", "test", "./..."])  # npm's placeholder skipped
+            (repo / "package.json").write_text('{"scripts": {"test": "node --test"}}', encoding="utf-8")
+            self.assertEqual(gates.verify_command(repo, auto), ["npm", "test", "--silent"])
+            (repo / "tests").mkdir()
+            (repo / "tests" / "test_a.py").write_text("", encoding="utf-8")
+            self.assertEqual(gates.verify_command(repo, auto), ["python", "-m", "unittest", "discover", "-s", "tests"])
+            (repo / "loop-policy.toml").write_text('[verification]\nquick_gate = "make check"\n', encoding="utf-8")
+            self.assertEqual(gates.verify_command(repo, auto), ["make", "check"])
+            by_repo = {"command": "auto", "by_repo": {"demo": ["pytest", "-q"], "other": "x"}}
+            self.assertEqual(gates.verify_command(repo, by_repo), ["pytest", "-q"])
+
     def test_test_file_patterns(self):
         for yes in ("tests/x.py", "test_calc.py", "pkg/test_a.py", "a_test.py", "features/x.feature", "src/a.spec.ts"):
             self.assertTrue(gates.is_test_file(yes), yes)
