@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -34,11 +35,34 @@ def canonical(env: dict) -> bytes:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+WINDOWS_OPENSSH = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "OpenSSH" / "ssh-keygen.exe"
+
+
 def _ssh_keygen() -> str:
+    """Windows' own OpenSSH first, whatever PATH says.
+
+    Git for Windows ships another ssh-keygen; a key it creates gets ACLs that Windows
+    OpenSSH rejects ("private key files are NOT accessible by others"). A scheduled
+    watch and a Git Bash prompt see different PATHs, so a key made in one could not
+    sign in the other. Found live: a worker's replies went out unsigned.
+    """
+    if sys.platform == "win32" and WINDOWS_OPENSSH.is_file():
+        return str(WINDOWS_OPENSSH)
     exe = shutil.which("ssh-keygen")
     if not exe:
         raise SigningError("ssh-keygen not found (install the OpenSSH client)")
     return exe
+
+
+def restrict_key(key: Path) -> None:
+    """Windows: only the current user may read the private key (OpenSSH refuses it otherwise)."""
+    if sys.platform != "win32":
+        return
+    user = os.environ.get("USERNAME")
+    if not user:
+        return
+    for args in (["/inheritance:r"], ["/grant:r", f"{user}:F"]):
+        procs.run(["icacls", str(key), *args], capture_output=True, check=False, timeout=TIMEOUT)
 
 
 def _run(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess:
@@ -63,6 +87,7 @@ def keygen(key: Path, agent: str) -> str:
                  "-f", str(key)])
     if proc.returncode != 0:
         raise SigningError(f"ssh-keygen failed: {proc.stderr.decode(errors='replace').strip()}")
+    restrict_key(key)
     return Path(str(key) + ".pub").read_text(encoding="utf-8").strip()
 
 
