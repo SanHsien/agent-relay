@@ -42,7 +42,7 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 同一台電腦可以同時當指揮者和收件端。兩邊各用一個 home、共用同一份 store，各自有一個排程，並互相信任對方的簽章金鑰。一行指令建好，之後也能用它復原（SPEC §19）：
 
 ```powershell
-python -m pip install -e C:\GitHubgent-relay            # 任何資料夾都能執行 python -m agent_relay
+python -m pip install -e C:\GitHub\agent-relay            # 任何資料夾都能執行 python -m agent_relay
 python -m agent_relay setup-local --auto                   # 指揮者＋本機工人＋兩個排程；可重複執行
 ```
 
