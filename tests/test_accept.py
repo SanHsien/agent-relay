@@ -138,6 +138,20 @@ class AcceptTests(AcceptBase):
         self.assertEqual([a["status"] for a in audits], ["accepted"])
         self.assertEqual([s for s, e in self.store.list("commander", ("done",)) if e["id"] == reply["id"]], ["done"])
 
+    def test_push_after_merge_only_to_allowed_remotes(self):
+        _, reply = self.dispatch_task()
+        report = self.accept(reply, push=True)  # origin is a local path not in accept.push_remotes
+        self.assertEqual(report["status"], "accepted", report)
+        self.assertNotIn("pushed", report)
+        self.assertTrue(any("not pushed" in n for n in report["notes"]), report["notes"])
+        self.assertNotEqual(git("rev-parse", "main", cwd=self.remote), git("rev-parse", "HEAD", cwd=self.commander))
+        self.commander_cfg["accept"].update(push=True, push_remotes=[str(self.remote)])
+        _, reply = self.dispatch_task()
+        report = self.accept(reply)
+        self.assertEqual(report["status"], "accepted", report)
+        self.assertEqual(report["pushed"], "origin/main")
+        self.assertEqual(git("rev-parse", "main", cwd=self.remote), git("rev-parse", "HEAD", cwd=self.commander))
+
     def test_rejects_when_verification_fails_here(self):
         _, reply = self.dispatch_task(worker=BAD_WORKER)  # the receiver had no gates, so it reported ok
         before = git("rev-parse", "HEAD", cwd=self.commander)

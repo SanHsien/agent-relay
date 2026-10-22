@@ -509,6 +509,8 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
   - 本機 clone 的找法：原派工信的 repo 資料夾名稱，到 `accept.repo_roots` 底下找同名的 git repo；找不到就略過，記在 log。
   - 本機前置檢查不通過時（工作目錄不乾淨、分支不對），accept 不會留下任何紀錄，回信維持未結案，`relay status` 看得到，可以手動 `relay accept`。
   - `accept.push: true`：合併後把該分支推送到 origin（`relay accept --push` 同效）。
+    - 推送前用第 14 節同一套規則檢查 origin 的每個 push URL：只推主人自己的 GitHub repo，或 `accept.push_remotes` 列出的遠端；有任何一個不符就不推，合併照樣保留，原因寫進 notes。
+    - hooks 照常執行（這是主人自己的 clone）。推送失敗不影響合併結果。
   - `accept.window: true`：在 Windows Terminal 分頁執行；預設在背景執行。
 - **純通知自動結案**（`auto_ack_notes`）：relay accept 寄給收件端的 `accepted:`／`rejected:` 開頭 note 只是通知，`watch` 響完門鈴就自動 ack。
 

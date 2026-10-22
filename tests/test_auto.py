@@ -75,6 +75,7 @@ class AutoTests(AcceptBase):
 
     def test_accept_push(self):
         _, reply = self.dispatch_task()
+        self.commander_cfg["accept"]["push_remotes"] = [str(self.remote)]
         report = self.accept(reply, push=True)
         self.assertEqual((report["status"], report.get("pushed")), ("accepted", "origin/main"))
         self.assertEqual(git("rev-parse", "main", cwd=self.remote), report["merge"])

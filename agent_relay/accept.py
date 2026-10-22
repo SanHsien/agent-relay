@@ -15,7 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import config, envelope, gates, gitsync, locks, procs, signing
+from . import config, dispatch, envelope, gates, gitsync, locks, procs, signing
 from .store import Store
 
 SHA_LEN = 40
@@ -136,15 +136,23 @@ def accept(cfg: dict, agent: str, reply_id: str, repo: Path, into: str | None = 
         # The exact merge commit that was verified, nothing else: a fast-forward to it.
         _git(repo, "merge", "--ff-only", "--quiet", merged)
         report.update(status="accepted", merge=merged)
-        if push or (cfg.get("accept") or {}).get("push"):
-            # Only the branch that was verified and fast-forwarded; hooks stay on (the owner's repo).
-            proc = procs.run(["git", "-C", str(repo), "push", "--quiet", "origin", current],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             check=False, timeout=300)
-            if proc.returncode == 0:
-                report["pushed"] = f"origin/{current}"
+        policy = cfg.get("accept") or {}
+        if push or policy.get("push"):
+            # The same rule as the receiver's push (SPEC section 14): every push url must be the owner's.
+            urls = [u for u in _git(repo, "remote", "get-url", "--push", "--all", "origin").splitlines() if u.strip()]
+            bad = [u for u in urls if not dispatch.push_allowed(u, policy)]
+            if not urls or bad:
+                notes.append(f"merged, not pushed: origin {', '.join(bad or ['(none)'])} is not one of the "
+                             "owner's repos or accept.push_remotes")
             else:
-                notes.append(f"merged, but push failed: {(proc.stderr or proc.stdout).strip()[:300]}")
+                # Only the branch that was verified and fast-forwarded; hooks stay on (the owner's repo).
+                proc = procs.run(["git", "-C", str(repo), "push", "--quiet", "origin", current],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                 check=False, timeout=300)
+                if proc.returncode == 0:
+                    report["pushed"] = f"origin/{current}"
+                else:
+                    notes.append(f"merged, but push failed: {(proc.stderr or proc.stdout).strip()[:300]}")
     except AcceptError as exc:
         report["reason"] = str(exc)
     except (subprocess.SubprocessError, OSError) as exc:
