@@ -21,7 +21,7 @@ App sidecar（每 5 分鐘 pull）<----------+
 - 本接法不需要增加或修改 hooks。原有 guard、停用設定及工人權限維持原值。
 - App 必須開著，sidecar 才會執行。這不是關機後也能喚醒 App 的 Windows 服務。
 - `relay send --run agy` 是另一條路：開**新**的 CLI 工人，仍依 SPEC §7 使用 `plan + sandbox`。不適用本頁的既有會話收信。
-- 既有會話沿用自己的工作目錄，不自動建立獨立 worktree。多個 Agent 共用 checkout 時，可能有人把別人的未提交檔案一起提交；需要並行施工時，先為收件會話建立專用 worktree，並將 `repo` 綁定到該目錄。通知與簽章不能代替檔案範圍隔離。
+- 既有會話沿用自己的工作目錄，不自動建立獨立 worktree。多個 Agent 共用 checkout 時，可能有人把別人的未提交檔案一起提交；需要並行施工時，先為收件會話建立專用 worktree，並將 `repos` 綁定到該目錄。通知與簽章不能代替檔案範圍隔離。
 
 ## 1. 建立獨立收件端 home
 
@@ -35,7 +35,7 @@ App sidecar（每 5 分鐘 pull）<----------+
   "store": "C:/path/to/local/mailbox-store",
   "antigravity": {
     "conversation_id": "00000000-0000-0000-0000-000000000000",
-    "repo": "C:/GitHub/target-repo",
+    "repos": ["C:/GitHub/target-repo", "C:/GitHub/other-repo"],
     "senders": ["commander"],
     "max_age_hours": 24,
     "agentapi_argv": ["C:/path/to/native/agentapi.exe"]
@@ -43,7 +43,7 @@ App sidecar（每 5 分鐘 pull）<----------+
 }
 ```
 
-`conversation_id` 由收件端明確指定，不讓信件任意選會話。`repo` 必須存在。寄件者空清單就不通知。金鑰與信任設定沿用 SPEC §13：
+`conversation_id` 由收件端明確指定，不讓信件任意選會話。`repos` 是非空清單，每個路徑都必須是既有目錄，同一個會話接受清單內任一 repo 的工單；信件的 `--project` 必須在清單內，通知文字會寫該信自己的 project 路徑（只有 session ref、沒有 project 的信，則寫範圍以信件所定義為準）。舊設定的單一字串 `repo` 仍可用，等同只有一個元素的 `repos`；`repos` 與 `repo` 同時出現會報錯。多個 repo 共用同一會話時，上方的檔案範圍隔離提醒照樣適用。寄件者空清單就不通知。金鑰與信任設定沿用 SPEC §13：
 
 ```powershell
 python -m agent_relay keygen --home "$HOME/.agent-relay-antigravity"

@@ -73,6 +73,60 @@ class AppDeliveryTests(unittest.TestCase):
         self.mail(refs=[], project=str(self.repo))
         self.assertEqual(self.deliver()['status'], 'notified')
 
+    def use_repos(self, *paths):
+        del self.cfg['antigravity']['repo']
+        self.cfg['antigravity']['repos'] = [str(p) for p in paths]
+        self.save()
+
+    def test_multiple_repos_second_repo_notified_with_its_own_path(self):
+        second = self.home / 'other-repo'
+        second.mkdir()
+        self.use_repos(self.repo, second)
+        mail = self.mail(refs=[], project=str(second))
+        self.assertEqual(self.deliver()['status'], 'notified')
+        text = self.run.call_args.args[0][-1]
+        self.assertIn(str(second.resolve()), text)
+        self.assertNotIn(str(self.repo.resolve()), text)
+        self.assertIn(mail['id'], text)
+
+    def test_session_ref_without_project_says_scope_is_in_mail(self):
+        second = self.home / 'other-repo'
+        second.mkdir()
+        self.use_repos(self.repo, second)
+        self.mail()
+        self.assertEqual(self.deliver()['status'], 'notified')
+        text = self.run.call_args.args[0][-1]
+        self.assertIn('信件所定義範圍', text)
+        self.assertNotIn(str(self.repo.resolve()), text)
+        self.assertNotIn(str(second.resolve()), text)
+
+    def test_unlisted_repo_is_skipped_even_with_session_ref(self):
+        second = self.home / 'other-repo'
+        second.mkdir()
+        self.use_repos(self.repo, second)
+        self.mail(refs=[], project=str(self.home / 'unlisted'))
+        self.mail(project=str(self.home / 'unlisted'))
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_legacy_repo_config_still_works(self):
+        self.mail(refs=[], project=str(self.repo))
+        self.assertEqual(self.deliver()['status'], 'notified')
+        self.assertIn(str(self.repo.resolve()), self.run.call_args.args[0][-1])
+
+    def test_both_repo_and_repos_is_an_error(self):
+        self.cfg['antigravity']['repos'] = [str(self.repo)]
+        self.save()
+        with self.assertRaises(ValueError):
+            self.deliver()
+        self.run.assert_not_called()
+
+    def test_missing_repo_in_list_is_an_error(self):
+        self.use_repos(self.repo, self.home / 'missing')
+        with self.assertRaises(ValueError):
+            self.deliver()
+        self.run.assert_not_called()
+
     def test_signed_followup_reply_can_reach_same_conversation(self):
         self.mail(kind='reply', reply_to='original-task')
         self.assertEqual(self.deliver()['status'], 'notified')

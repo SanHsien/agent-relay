@@ -41,15 +41,29 @@ def deliver_once(home: Path, *, sync: bool = True) -> dict:
     return result
 
 
+def _repos(settings: dict) -> set[Path]:
+    """Resolved set of repos the bound conversation accepts; legacy `repo` is one element."""
+    if 'repos' in settings and 'repo' in settings:
+        raise ValueError('configure either repos or repo, not both')
+    raw = settings['repos'] if 'repos' in settings else [settings['repo']] if 'repo' in settings else None
+    if (not isinstance(raw, list) or not raw
+            or not all(isinstance(item, str) and item for item in raw)):
+        raise ValueError('requires a non-empty repos list (or legacy repo string)')
+    repos = {Path(item).resolve() for item in raw}
+    if not all(path.is_dir() for path in repos):
+        raise ValueError('requires every configured repo to be an existing directory')
+    return repos
+
+
 def _deliver(home: Path, *, sync: bool) -> dict:
     """At most one notification per cycle; attempted sends are never auto-retried."""
     cfg = json.loads((home / 'config.json').read_text(encoding='utf-8'))
     settings = cfg['antigravity']
     session = str(uuid.UUID(settings['conversation_id']))
-    repo = Path(settings['repo']).resolve()
+    repos = _repos(settings)
     agent = cfg['agent']
-    if agent != 'antigravity' or not repo.is_dir():
-        raise ValueError('requires antigravity mailbox and an existing configured repo')
+    if agent != 'antigravity':
+        raise ValueError('requires antigravity mailbox')
     senders = settings.get('senders') or []
     argv = settings['agentapi_argv']
     if (not isinstance(argv, list) or not argv or
@@ -69,9 +83,10 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         if session_refs:
             if session_refs != [f'antigravity-session:{session}']:
                 continue
-        elif not mail.get('project') or Path(mail['project']).resolve() != repo:
+        elif not mail.get('project'):
             continue
-        if mail.get('project') and Path(mail['project']).resolve() != repo:
+        project = Path(mail['project']).resolve() if mail.get('project') else None
+        if project is not None and project not in repos:
             continue
         if mail.get('dispatch'):
             continue  # dispatch is a different, fresh-worker protocol
@@ -99,9 +114,10 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         except FileExistsError:
             continue
         # Fixed text only. Full signed mail stays in the mailbox until the agent reads it.
+        scope = f"{project} 的任務" if project is not None else "信件所定義範圍的任務"
         notification = (
             f"agent-relay 有一封已驗證寄件者的工作訊息，ID {mail['id']}。"
-            f"本機已授權將 {repo} 的任務交給這個會話；先完成目前安全步驟，再收信。"
+            f"本機已授權將{scope}交給這個會話；先完成目前安全步驟，再收信。"
             f"執行 python -m agent_relay read {mail['id']} --agent antigravity "
             f'--home "{home}" --json。依信件範圍與驗收條件處理，保留目前模型、權限與 hooks。'
             f"回信使用同一 --home，--from antigravity --to {mail['from']} --kind result "
