@@ -110,10 +110,16 @@ class SourceTests(Base):
         outside.mkdir()
         (outside / "a.md").write_text("---\nstatus: pending\n---\n# leaked card\n", encoding="utf-8")
         (self.repo / ".claude").mkdir()
+        link = self.repo / ".claude" / "handoffs"
         try:
-            os.symlink(outside, self.repo / ".claude" / "handoffs", target_is_directory=True)
+            os.symlink(outside, link, target_is_directory=True)
         except OSError:
-            self.skipTest("symlink privilege not available")
+            if os.name != "nt":
+                self.skipTest("symlink privilege not available")
+            # Windows without symlink privilege: a directory junction needs none and points
+            # outside the repo the same way, so it is the more likely real-world case.
+            import _winapi
+            _winapi.CreateJunction(str(outside), str(link))
         self.assertNotIn("leaked card", context.bundle(self.repo, {}))
 
 
