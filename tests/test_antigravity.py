@@ -1,4 +1,7 @@
+import contextlib
+import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -74,11 +77,58 @@ class AppDeliveryTests(unittest.TestCase):
         self.mail(kind='reply', reply_to='original-task')
         self.assertEqual(self.deliver()['status'], 'notified')
 
-    def test_invalid_signature_is_refused(self):
-        self.mail()
+    def test_invalid_signature_is_refused_once_with_receipt(self):
+        mail = self.mail()
         self.verify.return_value = 'bad signature'
-        self.assertEqual(self.deliver()['status'], 'idle')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.deliver()['status'], 'idle')
+            self.assertEqual(self.deliver()['status'], 'idle')
+        lines = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(lines, [{'id': mail['id'], 'status': 'refused', 'reason': 'bad signature'}])
+        receipt = json.loads((self.home / 'app-delivery' / f"{mail['id']}.json").read_text())
+        self.assertEqual(receipt, {'status': 'refused', 'reason': 'bad signature'})
         self.run.assert_not_called()
+
+    def test_policy_skipped_mail_is_silent_and_has_no_receipt(self):
+        self.mail(sender='mallory')
+        self.verify.return_value = 'bad signature'
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.deliver()
+        self.assertEqual(out.getvalue(), '')
+        self.assertEqual(list((self.home / 'app-delivery').glob('*.json')), [])
+
+    def beat_path(self):
+        host = antigravity.relay_status._host()
+        return Path(self.cfg['store']) / 'hosts' / f'antigravity@{host}.json'
+
+    def test_heartbeat_written_on_idle_and_notified_cycles(self):
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.assertTrue(self.beat_path().is_file())
+        self.beat_path().unlink()
+        self.mail()
+        self.assertEqual(self.deliver()['status'], 'notified')
+        beat = json.loads(self.beat_path().read_text())
+        self.assertEqual((beat['agent'], beat['running'], beat['queued']), ('antigravity', [], []))
+
+    def test_sidecar_main_ignores_main_home_dispatch_runs(self):
+        runs = self.home / 'main-home' / 'runs' / 'task1'
+        runs.mkdir(parents=True)
+        (runs / 'state.json').write_text(json.dumps({'phase': 'running', 'pid': os.getpid()}))
+        env = {'AGENT_RELAY_HOME': str(self.home / 'main-home')}
+        with mock.patch.dict(os.environ, env),                 mock.patch.object(antigravity.gitsync, 'pull'),                 mock.patch.object(antigravity.gitsync, 'sync'),                 mock.patch('sys.argv', ['antigravity', '--home', str(self.home), '--once']),                 contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(antigravity.main(), 0)
+        beat = json.loads(self.beat_path().read_text())
+        self.assertEqual((beat['running'], beat['queued']), ([], []))
+
+    def test_heartbeat_sync_failure_keeps_notified(self):
+        self.mail()
+        with mock.patch.object(antigravity.gitsync, 'pull'),                 mock.patch.object(antigravity.gitsync, 'sync',
+                                  side_effect=antigravity.gitsync.SyncError('push failed')):
+            result = antigravity.deliver_once(self.home, sync=True)
+        self.assertEqual(result['status'], 'notified')
+        self.assertEqual(result['heartbeat_error'], 'SyncError')
 
     def test_timeout_retains_uncertain_receipt_and_does_not_retry(self):
         mail = self.mail()

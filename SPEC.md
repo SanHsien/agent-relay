@@ -543,6 +543,7 @@ python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime cl
 - `python -m agent_relay.antigravity --home <receiver-home>`：每 300 秒同步 store，最多通知一封未讀 task／reply；`--once` 只做一輪，`--interval` 最少 30 秒。
 - 收件 home 必須設定信箱 `antigravity`、`antigravity.conversation_id`、`repo`、`senders` 與 `agentapi_argv`，以及 SPEC §13 的本機受信任公鑰。只接受有效簽章、受允許寄件者、期限內（預設 24 小時），且 session ref 或 project 符合本機綁定的工單；有 dispatch 的工單不走這條路。
 - 通知內容只有 ID 與固定收信／回報指令，不執行信件文字。會話自身的模型、hooks、權限與人工確認要求繼續生效。
-- `app-delivery/<id>.json` 排他建立 `attempting` 收據後才通知；成功為 `notified`、非零為 `failed`、逾時為 `uncertain`。所有已嘗試的信件都不自動重送，避免不確定結果造成重複施工。通知不等於收信：原信由會話執行 read／result／ack。
+- `app-delivery/<id>.json` 排他建立 `attempting` 收據後才通知；成功為 `notified`、非零為 `failed`、逾時為 `uncertain`。簽章驗證失敗的信寫 `refused`（含原因）收據，只在第一次輸出拒絕訊息，之後的輪次靜默略過；因政策略過的信（寄件者、會話、專案、期限不符）不寫收據也不輸出。所有已嘗試的信件都不自動重送，避免不確定結果造成重複施工。通知不等於收信：原信由會話執行 read／result／ack。
+- 每輪結束（有通知或閒置）sidecar 依 §16 寫 `hosts/antigravity@<主機>.json` 心跳，由 `relay status` 顯示；到期才寫並 push，心跳或 push 失敗只記入結果的 `heartbeat_error`，不影響已送出的 `notified`。sidecar 啟動時把 `AGENT_RELAY_HOME` 設為自己的 `--home`（該目錄沒有 `runs/`），所以 `running`／`queued` 恆為空，不會冒用主收件端的派工。
 - 不需要新的 Windows 收信排程；App 必須運行。停用 sidecar 不刪信、不刪收據。
 - 現行 Antigravity 官方 hooks 支援 SessionStart 與 PreInvocation，但與 Claude 格式不同；本接法不用變更任何現有 hook。

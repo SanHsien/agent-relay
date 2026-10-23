@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import gitsync, procs, signing
+from . import status as relay_status
 from .context import redact
 from .store import Store
 
@@ -28,6 +29,19 @@ def _write(path: Path, value: dict) -> None:
 
 
 def deliver_once(home: Path, *, sync: bool = True) -> dict:
+    """One cycle, then a receiver heartbeat (SPEC section 16). A heartbeat failure never
+    turns a delivered notification into an error; it is recorded as heartbeat_error."""
+    result = _deliver(home, sync=sync)
+    cfg = json.loads((home / 'config.json').read_text(encoding='utf-8'))
+    try:
+        if relay_status.heartbeat(cfg, 'antigravity') and sync:
+            gitsync.sync(Path(cfg['store']), "relay: antigravity heartbeat")
+    except (gitsync.SyncError, OSError) as exc:
+        result['heartbeat_error'] = type(exc).__name__
+    return result
+
+
+def _deliver(home: Path, *, sync: bool) -> dict:
     """At most one notification per cycle; attempted sends are never auto-retried."""
     cfg = json.loads((home / 'config.json').read_text(encoding='utf-8'))
     settings = cfg['antigravity']
@@ -70,6 +84,12 @@ def deliver_once(home: Path, *, sync: bool = True) -> dict:
             continue
         reason = signing.verify(mail, allowed)
         if reason:
+            # Keep a receipt so a refused mail is reported once, not on every cycle.
+            try:
+                with (state_dir / f"{mail['id']}.json").open('x', encoding='utf-8') as out:
+                    json.dump({'status': 'refused', 'reason': reason}, out)
+            except FileExistsError:
+                continue
             print(json.dumps({'id': mail['id'], 'status': 'refused', 'reason': reason}), flush=True)
             continue
         receipt = state_dir / f"{mail['id']}.json"
@@ -112,6 +132,9 @@ def main() -> int:
     args = parser.parse_args()
     if args.interval < 30:
         parser.error('--interval must be at least 30 seconds')
+    # The heartbeat lists dispatch runs found under config.home(); this sidecar has its own
+    # home (no runs/), so point it there instead of reporting the main receiver's runs.
+    os.environ['AGENT_RELAY_HOME'] = str(args.home.resolve())
     while True:
         try:
             result = deliver_once(args.home.resolve())

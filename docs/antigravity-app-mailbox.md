@@ -103,6 +103,7 @@ python -m agent_relay send --to antigravity --kind task --project C:/GitHub/targ
 
 - `notified`：通知命令 exit 0；同信不再通知。
 - `failed`：命令非零；不自動重試，先讀 App sidecar 的錯誤紀錄。
+- `refused`：簽章驗證失敗，收據記錄原因；拒絕訊息只輸出一次，之後的輪次靜默略過。
 - `uncertain`／`attempting`：逾時或程序中斷，可能已送達。先看指定會話，**不要盲目重送**。
 
 先記錄 `attempting` 再呼叫 API，並利用檔案的排他建立避免兩個程序同時發同信。這是偏向避免重複施工的策略，不是 exactly-once 保證。確定未送達且排除錯誤後，才由操作者備份並移走該張收據，允許下一輪補通知；不要重寄工單。排程正常時不反覆跑手動 smoke，不另建第二張試驗資料。
@@ -112,5 +113,7 @@ python -m agent_relay send --to antigravity --kind task --project C:/GitHub/targ
 ```powershell
 python -m agent_relay.antigravity --home "$HOME/.agent-relay-antigravity" --once
 ```
+
+sidecar 每輪也會寫 `hosts/antigravity@<主機>.json` 心跳並推送（頻率見 SPEC §16），指揮者的 `relay status` 因此看得到 `antigravity@<主機>`；App 關閉、sidecar 停止後，該心跳會逾時。心跳推送失敗只在輸出的 `heartbeat_error` 記錄，不影響通知。
 
 停用只把 `config.json` 的 `sidecars.agent-relay.enabled` 改成 `false`，保留信箱、收據與金鑰供追查。
