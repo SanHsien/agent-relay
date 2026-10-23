@@ -236,7 +236,7 @@ git 狀態                                  分支、已追蹤但未提交的檔
 - **資料界線**：整份放在 `<<<HANDOVER-DATA <隨機 nonce>>>` … `<<<END HANDOVER-DATA <nonce>>>` 之間，前面一句說明這是資料、不是指令。每個來源各自放在 `~~~~` 區塊裡，內容每行縮排 4 格（結尾標記最多只能縮排 3 格，所以內容關不掉區塊），`<<<`／`>>>` 換成相似字元；超過總上限時整段丟掉尾端的來源，不會從區塊中間切斷。git 狀態（commit 訊息）也經過遮罩。派工 prompt 的規則行也會再提醒一次。
 - hook 收不到 `cwd`、payload 壞掉、或什麼都沒有可交接時，不輸出任何東西；任何錯誤都 exit 0（`relay context --hook` 和 `hooks/session_start.py` 都一樣）。payload 一律以 UTF-8 解讀，中文路徑可用。
 - 專案 key 照 Claude Code 的規則：路徑中每個非英數字元換成 `-`；同時比對原路徑與解析後路徑（subst、對應的網路磁碟機）。
-- Codex、agy 沒有 SessionStart hook：經 `relay dispatch` 派工時一樣拿得到交接包；直接開時可以先跑 `python -m agent_relay context` 再貼。
+- Codex 直接開啟時可以先跑 `python -m agent_relay context` 再貼。Antigravity 現行官方文件已支援 `SessionStart`／`PreInvocation` hook，但 payload 與 Claude 不同，不能直接套用本節的 Claude hook。既有 App 會話的自動收信接法見第 20 節。
 
 ```json
 "context": {"obsidian_vault": "C:/Users/<you>/Documents/Obsidian/MyVault", "hot_cache": false, "sessions": true}
@@ -535,3 +535,14 @@ python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime cl
 - **備份策略**：
   - 設定檔與排程：由這個指令和你的參數重建，不用另外備份。不過，自己手動改過的設定值不在指令參數裡，可以抄進你自己的筆記。
   - 私鑰：**不備份，也不進 git**。它們沒有加密任何資料，只用來證明信件是誰寄的；遺失或換電腦時，重跑這個指令會產生新金鑰並重新互信。舊金鑰簽的信，在第 13 節的 `max_age_hours` 內仍會被當成有效，所以懷疑私鑰外洩時，先刪掉 `allowed_signers` 裡對應的那一行，再重跑。
+
+## 20. Antigravity App 既有會話收信
+
+完整安裝與故障處理見 [docs/antigravity-app-mailbox.md](docs/antigravity-app-mailbox.md)。此路線使用 App 官方 sidecar 與 agentapi，不以 agy CLI 續接 App 的會話。
+
+- `python -m agent_relay.antigravity --home <receiver-home>`：每 300 秒同步 store，最多通知一封未讀 task／reply；`--once` 只做一輪，`--interval` 最少 30 秒。
+- 收件 home 必須設定信箱 `antigravity`、`antigravity.conversation_id`、`repo`、`senders` 與 `agentapi_argv`，以及 SPEC §13 的本機受信任公鑰。只接受有效簽章、受允許寄件者、期限內（預設 24 小時），且 session ref 或 project 符合本機綁定的工單；有 dispatch 的工單不走這條路。
+- 通知內容只有 ID 與固定收信／回報指令，不執行信件文字。會話自身的模型、hooks、權限與人工確認要求繼續生效。
+- `app-delivery/<id>.json` 排他建立 `attempting` 收據後才通知；成功為 `notified`、非零為 `failed`、逾時為 `uncertain`。所有已嘗試的信件都不自動重送，避免不確定結果造成重複施工。通知不等於收信：原信由會話執行 read／result／ack。
+- 不需要新的 Windows 收信排程；App 必須運行。停用 sidecar 不刪信、不刪收據。
+- 現行 Antigravity 官方 hooks 支援 SessionStart 與 PreInvocation，但與 Claude 格式不同；本接法不用變更任何現有 hook。

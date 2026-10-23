@@ -8,6 +8,7 @@
 
 - 協定規格：[SPEC.md](SPEC.md)
 - 給 Agent 的操作說明：[AGENTS.md](AGENTS.md)
+- Antigravity App 既有會話收信：[sidecar 安裝、簽章與驗收](docs/antigravity-app-mailbox.md)（不同於 `--run agy` 新開唯讀 CLI 工人）
 
 ## 快速開始
 
