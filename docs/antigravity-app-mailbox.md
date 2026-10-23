@@ -21,6 +21,7 @@ App sidecar（每 5 分鐘 pull）<----------+
 - 本接法不需要增加或修改 hooks。原有 guard、停用設定及工人權限維持原值。
 - App 必須開著，sidecar 才會執行。這不是關機後也能喚醒 App 的 Windows 服務。
 - `relay send --run agy` 是另一條路：開**新**的 CLI 工人，仍依 SPEC §7 使用 `plan + sandbox`。不適用本頁的既有會話收信。
+- 既有會話沿用自己的工作目錄，不自動建立獨立 worktree。多個 Agent 共用 checkout 時，可能有人把別人的未提交檔案一起提交；需要並行施工時，先為收件會話建立專用 worktree，並將 `repo` 綁定到該目錄。通知與簽章不能代替檔案範圍隔離。
 
 ## 1. 建立獨立收件端 home
 

@@ -433,11 +433,12 @@ class LimitTests(DispatchBase):
         self.cfg["dispatch"]["max_concurrent"] = 2
         logs = self.dir / "overlap"
         logs.mkdir()
-        # Each worker writes its own start/end times around a short sleep (appends to one shared
-        # file are not atomic on Windows); a separate repo each, so git never contends.
-        code = ("import os, time, pathlib;"
+        # Each task has a unique worktree name. Windows can recycle a worker PID
+        # within this run, so PID-named logs can overwrite an earlier worker's span.
+        # A separate repo each keeps git from contending.
+        code = ("import time, pathlib;"
                 "start = time.time(); time.sleep(1.5);"
-                f"(pathlib.Path(r'{logs}') / str(os.getpid())).write_text(f'{{start}} {{time.time()}}');"
+                f"(pathlib.Path(r'{logs}') / pathlib.Path.cwd().name).write_text(f'{{start}} {{time.time()}}');"
                 "pathlib.Path('proof.txt').write_text('x')")
         envs = []
         for n in range(5):
@@ -466,6 +467,7 @@ class LimitTests(DispatchBase):
                 t.join()
         self.assertEqual(errors, [])
         self.assertEqual(sorted(r["status"] for r in reports), ["ok"] * 5)
+        self.assertEqual({f.name for f in logs.iterdir()}, {e['id'] for e in envs})
         spans = [tuple(map(float, f.read_text().split())) for f in logs.iterdir()]
         self.assertEqual(len(spans), 5)
         events = sorted([(s, "start") for s, _ in spans] + [(e, "end") for _, e in spans])

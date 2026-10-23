@@ -22,6 +22,7 @@
 - 13:13:23：回信 `20261023T051323313Z-5df9ae`，`reply_to` 指向原工單；指揮者以本機受信任公鑰檢查簽章，結果 `valid`。
 - 工作內容另作驗收：首次報告有論文數字、引用與無來源推論問題，不能因為 CLI／CI 成功就視為內容驗收通過。已在同 thread 寄出集中修正意見，覆核後再限定三個表格／文字位置收尾，沿用同一會話，未重派原工單。這份紀錄確認通道成功，並不代替該報告的內容驗收。
 - 13:15:18：sidecar 載入新版（支援同 thread 的 `reply`），修正訊息 `20261023T051435800Z-f58753` 的通知 exit 0；原會話隨後開始修正。
+- 最後收尾回信 `20261023T052426845Z-53376e` 簽章 `valid`，對應修正訊息已 `done`。三處指定文字修正已逐項核對，遠端報告 blob 與本機一致；`ai-inbox` 提交 `f77282b967c4bb233eb3fc285d07b9bae53fcffd` 的 CI 成功。指揮者已將三封結果信結案並同步。共用 checkout 期間另有其他工作提交，因此不宣稱該提交只包含這張工單。
 
 ## 接線陷阱
 
@@ -36,5 +37,7 @@
 
 - 本機全套 `python -m unittest discover -s tests`：299 tests、`OK (skipped=1)`，506.390 秒。
 - 隨後只修改新模組的錯誤處理與後續訊息支援；最終聚焦 `python -m unittest discover -s tests -p test_antigravity.py`：11 tests、`OK`，0.740 秒。既有模組沒有變更；發布 CI 會在最終提交重新跑完整套件。
+- 首次發布 CI 在 Windows 的既有並發測試失敗：5 個回報都是 `ok`，但 PID 命名的時間紀錄只有 4 份。Windows 可以重用已結束的 PID，導致測試紀錄覆寫。已改成每張工單唯一的 worktree ID 命名，另外驗證完整 ID 集合；原本的並發峰值 `2` 與 slot 清空檢查保留，沒有放寬產品限制。
+- 修正後聚焦 `test_dispatch.LimitTests.test_at_most_max_concurrent_workers`：1 test、`OK`，14.692 秒；接線模組 11 tests 仍通過。
 
 通知成功證明 API 接受訊息；`read`、回信與簽章證據才證明接手及回報。工作產出品質須另外驗收，不與通道成功混為一談。
