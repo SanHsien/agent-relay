@@ -1,0 +1,16 @@
+[project]
+name = "agent-relay"
+version = "0.1.0"
+description = "File + git mailbox so AI coding agents can pass work to each other"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[project.scripts]
+agent-relay = "agent_relay.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["agent_relay"]
