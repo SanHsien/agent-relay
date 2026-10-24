@@ -1,4 +1,5 @@
-"""Antigravity App sidecar: notify one explicitly configured existing conversation.
+"""Antigravity App sidecar: notify one explicitly configured existing conversation,
+or open a new top-level Desktop conversation when mail carries `antigravity-session:new`.
 
 Uses the App's agentapi, not agy CLI's separate conversation store. Only message
 IDs and fixed relay commands enter the notification; mail text is never argv.
@@ -80,10 +81,13 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         # A signed explicit session ref, or a signed project, must match local policy.
         refs = mail.get('refs', [])
         session_refs = [ref for ref in refs if ref.startswith('antigravity-session:')]
+        new_conv = session_refs == ['antigravity-session:new']
         if session_refs:
-            if session_refs != [f'antigravity-session:{session}']:
+            if not new_conv and session_refs != [f'antigravity-session:{session}']:
                 continue
         elif not mail.get('project'):
+            continue
+        if new_conv and (mail['kind'] != 'task' or not mail.get('project')):
             continue
         project = Path(mail['project']).resolve() if mail.get('project') else None
         if project is not None and project not in repos:
@@ -108,9 +112,10 @@ def _deliver(home: Path, *, sync: bool) -> dict:
             print(json.dumps({'id': mail['id'], 'status': 'refused', 'reason': reason}), flush=True)
             continue
         receipt = state_dir / f"{mail['id']}.json"
+        target_session = 'new' if new_conv else session
         try:
             with receipt.open('x', encoding='utf-8') as out:
-                json.dump({'status': 'attempting', 'conversation_id': session}, out)
+                json.dump({'status': 'attempting', 'conversation_id': target_session}, out)
         except FileExistsError:
             continue
         # Fixed text only. Full signed mail stays in the mailbox until the agent reads it.
@@ -124,12 +129,27 @@ def _deliver(home: Path, *, sync: bool) -> dict:
             f"--reply-to {mail['id']}，附上實際驗證證據；最後 ack 原信。"
             "若與目前工作衝突或無法執行，回報阻擋，不另開工人。"
         )
-        result = {'id': mail['id'], 'conversation_id': session}
+        result = {'id': mail['id'], 'conversation_id': target_session}
+        if new_conv:
+            result['mode'] = 'new-conversation'
+        cmd = (
+            [*argv, 'new-conversation', f"--title=[Relay] {mail['id']}", notification]
+            if new_conv else
+            [*argv, 'send-message', session, notification]
+        )
         try:
-            proc = procs.run([*argv, 'send-message', session, notification],
+            proc = procs.run(cmd,
                              capture_output=True, text=True, encoding='utf-8', errors='replace',
                              timeout=30, check=False)
             result.update(status='notified' if proc.returncode == 0 else 'failed', exit=proc.returncode)
+            if new_conv and proc.returncode == 0 and isinstance(getattr(proc, 'stdout', None), str) and proc.stdout:
+                try:
+                    payload = json.loads(proc.stdout)
+                    spawned = payload.get('response', {}).get('newConversation', {}).get('conversationId')
+                    if isinstance(spawned, str) and spawned:
+                        result['conversation_id'] = spawned
+                except (ValueError, TypeError, AttributeError):
+                    pass
             if proc.returncode:
                 result['detail'] = redact(str(proc.stderr or proc.stdout or 'agentapi failed'))[:1000]
         except (OSError, subprocess.TimeoutExpired) as exc:

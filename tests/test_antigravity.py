@@ -228,6 +228,29 @@ class AppDeliveryTests(unittest.TestCase):
         self.mail()
         self.assertEqual(self.deliver()['status'], 'notified')
 
+    def test_new_conversation_ref_spawns_top_level_session_with_safe_title(self):
+        spawned_uuid = '22222222-2222-4222-8222-222222222222'
+        self.run.return_value = mock.Mock(
+            returncode=0,
+            stdout=json.dumps({'response': {'newConversation': {'conversationId': spawned_uuid}}}),
+        )
+        mail = self.mail(refs=['antigravity-session:new'], project=str(self.repo))
+        result = self.deliver()
+        self.assertEqual(result['status'], 'notified')
+        self.assertEqual(result['mode'], 'new-conversation')
+        self.assertEqual(result['conversation_id'], spawned_uuid)
+        argv = self.run.call_args.args[0]
+        self.assertEqual(argv[2:4], ['new-conversation', f"--title=[Relay] {mail['id']}"])
+        self.assertNotIn(mail['subject'], ' '.join(argv))
+        self.assertNotIn(mail['body'], ' '.join(argv))
+
+    def test_new_conversation_ref_requires_task_and_listed_project(self):
+        self.mail(refs=['antigravity-session:new'])
+        self.mail(kind='reply', refs=['antigravity-session:new'], project=str(self.repo))
+        self.mail(refs=['antigravity-session:new'], project=str(self.home / 'unlisted'))
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

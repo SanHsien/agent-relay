@@ -87,6 +87,7 @@ python -m agent_relay send --to antigravity --kind task --project C:/GitHub/targ
 ```
 
 也可用 `--ref antigravity-session:<UUID>` 指定已在收件端綁定的會話；若同時有 `--project`，專案也必須相符。不加 `--run`。既有信件已有正確 session ref 時直接沿用，不重寄、不修改簽過的信封。
+若外部 Agent（如 Claude Code、Codex、Hermes）希望在 **Antigravity Desktop 左側對話列表自動開一個全新的頂層可視對話**（`nestingDepth: 0`）來執行該工單，可帶 `--ref antigravity-session:new --project C:/GitHub/target-repo`（必須為 `kind=task` 且 `--project` 在 `repos` 白名單內）：sidecar 會呼叫 `agentapi new-conversation --title="[Relay] <信件ID>"` 建立頂層新會話，並將回傳的新 `conversationId` 記錄於 `app-delivery/<信件ID>.json`。
 
 同一工單的修正意見可用 `--kind reply --reply-to <原信 ID>`，同樣加上 session ref 或 project；沿用相同的簽章、寄件者與目的會話檢查。這是後續訊息，不是重開一張相同工單。`note`／`result` 不會喚醒這個收件端。
 
