@@ -1,3 +1,5 @@
+[English](antigravity-app-mailbox.en.md) | 繁體中文
+
 # Antigravity App：既有會話自動收信
 
 這是 **Antigravity App 的既有會話** 接法。它用官方 sidecar 與 `agentapi send-message`，不把 App 的會話 ID 交給 `agy --conversation`：CLI 與 App 使用不同的資料目錄，CLI 可能回 `trajectory not found`。

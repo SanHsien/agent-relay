@@ -14,4 +14,6 @@ jobs:
         with:
           python-version: "3.12"
       - run: git config --global user.email ci@example.com && git config --global user.name ci
+      - run: python tools/check_doc_parity.py
+      - run: python tools/check_links.py
       - run: python -m unittest discover -s tests -v

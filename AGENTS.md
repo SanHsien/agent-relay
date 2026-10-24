@@ -1,3 +1,5 @@
+[English](#agent-relay--operating-guide-for-agents) | 繁體中文
+
 # agent-relay — 給 Agent 的操作說明
 
 適用 Claude Code、Codex、Antigravity、Hermes 等任何能跑 shell 指令的 Agent。
@@ -38,5 +40,54 @@ python -m agent_relay ack <id>
 ## 改這個 repo
 
 - 只用 Python 標準函式庫，Windows 11 原生優先。
-- 改協定先改 [SPEC.md](SPEC.md)，再改程式和測試；`python -m unittest discover -s tests` 全綠才提交。
+- 改協定先改 [SPEC.md](SPEC.md) 與 [SPEC.en.md](SPEC.en.md)，再改程式和測試。
+- 公開文件維持繁體中文（無後綴 `.md`）與英文（`.en.md`）雙語同步：`README.md`／`README.en.md`、`SPEC.md`／`SPEC.en.md`、`docs/antigravity-app-mailbox.md`／`docs/antigravity-app-mailbox.en.md`、`docs/templates/escalation-prompt.md`／`docs/templates/escalation-prompt.en.md`。歷史實測與研究紀錄（`docs/evidence/`、`docs/reports/`）維持繁體中文原貌。
+- 提交前執行 `pwsh -NoProfile -File tools/dev_check.ps1`（或 `python -m unittest discover -s tests -v && python tools/check_doc_parity.py && python tools/check_links.py`）全綠才提交。
 - 本 repo 公開：私人 repo 一律寫 `[Private Repo: <別名>]`，不寫真名。
+
+---
+
+# agent-relay — Operating Guide for Agents
+
+Applies to Claude Code, Codex, Antigravity, Hermes, or any agent capable of running shell commands.
+
+## Receiving Mail
+
+1. At session start or when a doorbell rings: `python -m agent_relay inbox --json`.
+2. Read each message with `python -m agent_relay read <id> --json`. When `kind=task`, implement and verify according to the acceptance criteria in the body.
+3. Send a result reply with evidence, then acknowledge the message:
+
+```powershell
+python -m agent_relay send --to <sender> --kind result --reply-to <id> --subject "done: <original-subject>" --body-file result.md
+python -m agent_relay ack <id>
+```
+
+Result bodies must attach concrete evidence: test output, commit SHA, and file paths. Never send `result` without verification evidence.
+
+## Sending Mail
+
+- Use `--kind task` for task dispatch and structure the body into four sections: Goal & Motivation / Definition of Done (DoD) / Report Format / Requested Model (see [SPEC.en.md](SPEC.en.md) Section 6).
+- To drop a handoff card for the next `/pickup` session in the target project on the receiver, pass `--project <project-path-on-receiver>`; if the path is unknown, pass `--project asr:<session-name>` so the receiver resolves it from the `agent-session-restore` registry.
+- Messages enter git history: never include API keys, tokens, or passwords.
+- Task dispatches must be signed (SPEC Section 13): run `relay keygen` on the sender, give the public key to the receiver, and run `relay trust <your-mailbox> <pubkey>` on the receiver. When a key exists, `send` signs automatically. If `dispatch.senders` is unset on the receiver, all dispatches are refused.
+- To make the receiver **automatically spawn a new worker session**: pass `--run claude|claude-3p|codex|agy|hermes --repo <receiver-repo>` (see [SPEC.en.md](SPEC.en.md) Section 7). `claude-3p` routes through the local Claude Desktop 3P gateway. The receiver must allow that runtime and repository under `dispatch` in `config.json`. Pass `--run auto` to let the receiver pick based on complexity and local quota (SPEC Section 10), and `--path` to restrict the files the worker may modify (SPEC Section 9).
+
+## Mailbox Names
+
+| Mailbox | Owner |
+| --- | --- |
+| `commander` | Commander (the side that dispatches work and accepts results) |
+| `claude-code` | Claude Code |
+| `codex` | Codex CLI |
+| `antigravity` | Antigravity (`agy`) |
+| `hermes` | Hermes (Windows desktop edition) |
+
+New mailboxes require no pre-registration; sending the first message to a mailbox creates its directory automatically.
+
+## Modifying This Repo
+
+- Use only the Python standard library; prioritize native Windows 11 compatibility.
+- When changing the protocol, update [SPEC.md](SPEC.md) and [SPEC.en.md](SPEC.en.md) first, then update the implementation and tests.
+- Keep public documentation synchronized in Traditional Chinese (suffix-less `.md`) and English (`.en.md`): `README.md` / `README.en.md`, `SPEC.md` / `SPEC.en.md`, `docs/antigravity-app-mailbox.md` / `docs/antigravity-app-mailbox.en.md`, and `docs/templates/escalation-prompt.md` / `docs/templates/escalation-prompt.en.md`. Historical evidence and benchmark reports (`docs/evidence/`, `docs/reports/`) remain in Traditional Chinese.
+- Run `pwsh -NoProfile -File tools/dev_check.ps1` (or `python -m unittest discover -s tests -v && python tools/check_doc_parity.py && python tools/check_links.py`) and ensure all checks pass before committing.
+- Because this repository is public, always refer to private repositories as `[Private Repo: <Alias>]` and never write real private repository names.

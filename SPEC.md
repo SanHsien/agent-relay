@@ -1,3 +1,5 @@
+[English](SPEC.en.md) | 繁體中文
+
 # agent-relay 協定規格 v1
 
 這份規格定義各 Agent（Claude Code、Codex、Antigravity、Hermes、指揮者）之間怎麼寄信、收信、按門鈴。參考實作是本 repo 的 `agent_relay/`。任何語言照這份規格讀寫檔案都能互通，不一定要用參考 CLI。

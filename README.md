@@ -1,3 +1,5 @@
+[English](README.en.md) | 繁體中文
+
 # agent-relay
 
 [![CI](https://github.com/SanHsien/agent-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/SanHsien/agent-relay/actions/workflows/ci.yml)

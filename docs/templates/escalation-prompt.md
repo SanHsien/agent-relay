@@ -1,3 +1,5 @@
+[English](escalation-prompt.en.md) | 繁體中文
+
 # 回流升級除錯 Prompt 範本（Fallback Escalation Loop）
 
 便宜、快速的工人（例如 haiku、Gemini Flash、codex low）沒通過驗收時，relay 把**真實失敗證據**整理成這份 prompt，交給更強的模型（例如 Opus）在**同一個 worktree** 診斷並修正，再重跑同一套驗收閘門。程式實作在 `agent_relay/dispatch.py` 的 `build_escalation_prompt()`，兩者段落一致。
