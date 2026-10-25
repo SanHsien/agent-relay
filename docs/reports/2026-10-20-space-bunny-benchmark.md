@@ -4,9 +4,9 @@
 
 ## 結論先講
 
-- **主人決定（2026-10-21）**：不使用 MiniMax 這類中國服務。本報告的 MiniMax 段落只留作查證紀錄，不再補測，也不放進任何路由。
+- **維護者決定（2026-10-21）**：不使用 MiniMax 這類中國服務。本報告的 MiniMax 段落只留作查證紀錄，不再補測，也不放進任何路由。
 - **Space Bunny 已經不能照原計畫用**：它是 OpenRouter 的匿名測試模型 `stealth/space-bunny-alpha`，後來公布就是 **MiniMax M3.1 Flash**；免費的匿名期已結束，`space-bunny-alpha` 目前沒有可用端點，OpenCode 上的 `space-bunny-free` 也隨之失效。
-- 目前 OpenRouter 公開清單有 **`minimax/minimax-m3.1-flash:free`**：上下文 1,000,000 token、單次最多輸出 524,288 token、輸入輸出都是 $0。要呼叫它仍需要 **OpenRouter 帳號與 API key**，這台機器沒有（`OPENROUTER_API_KEY` 未設定、`opencode` 未安裝）。開帳號、填金鑰要主人自己做，所以 **MiniMax 本身的延遲、正確率、1M 承載力這次沒有實測**。
+- **2026-10-25 實測複查（免費版下架確定）**：2026-10-20 查證時存在的免費版 `minimax/minimax-m3.1-flash:free` 目前**已完全下架**。經 OpenRouter API 實測檢索，目前僅存付費端點 `minimax/minimax-m3.1-flash`（`pricing.prompt = 0.00000015`），無任何免費端點。依任務退回規範，確認免費版下架即關閉待辦。
 - 「便宜工人先做、失敗再升級」的流程已在本機用同等角色的模型實測打通（下面第 3 節）。
 
 ## 1. 查證來源與時間
@@ -15,10 +15,82 @@
 | --- | --- | --- |
 | Space Bunny 身分 | MiniMax M3.1 Flash | OpenRouter 模型頁 `openrouter.ai/stealth/space-bunny-alpha`（頁面寫明免費匿名期已結束） |
 | `stealth/space-bunny-alpha` 端點 | 0 個 | `GET https://openrouter.ai/api/v1/models/stealth/space-bunny-alpha/endpoints`（2026-10-20） |
-| 現行免費版 | `minimax/minimax-m3.1-flash:free`，ctx 1,000,000、max out 524,288、$0／$0 | `GET https://openrouter.ai/api/v1/models`（公開清單，不需金鑰，2026-10-20） |
+| 現行免費版（2026-10-20） | `minimax/minimax-m3.1-flash:free`（當時在線） | `GET https://openrouter.ai/api/v1/models`（公開清單，2026-10-20） |
+| **現行狀態（2026-10-25 實測）** | **完全下架（無端點）**，僅存付費端點 `minimax/minimax-m3.1-flash` | `GET https://openrouter.ai/api/v1/models`（2026-10-25 實跑查驗） |
 | 本機 opencodex 代理 | 185 個模型，沒有 MiniMax／Space Bunny | `GET http://127.0.0.1:10100/v1/models` |
 | 本機金鑰 | `OPENROUTER_API_KEY`、`OPENCODE_API_KEY`、`MINIMAX_API_KEY` 都未設定 | 只檢查有無，未讀內容 |
 
+### 1.1 2026-10-25 OpenRouter API 實測查驗命令與回傳 JSON 證據
+
+- **查驗時間**：`2026-10-25 21:56:23 (UTC+8)`
+- **實測查詢命令**：
+```powershell
+pwsh -NoProfile -Command '$res = Invoke-RestMethod -Uri "https://openrouter.ai/api/v1/models"; $matches = $res.data | Where-Object { $_.id -like "*space-bunny*" -or $_.id -like "*minimax*" }; $matches | Select-Object id, name, @{n="pricing_prompt";e={$_.pricing.prompt}}, @{n="pricing_completion";e={$_.pricing.completion}} | ConvertTo-Json -Depth 3'
+```
+- **回傳 JSON 輸出**：
+```json
+[
+  {
+    "id": "minimax/minimax-m3.1-flash",
+    "name": "MiniMax: MiniMax M3.1 Flash",
+    "pricing_prompt": "0.00000015",
+    "pricing_completion": "0.0000006"
+  },
+  {
+    "id": "minimax/minimax-m3",
+    "name": "MiniMax: MiniMax M3",
+    "pricing_prompt": "0.0000003",
+    "pricing_completion": "0.0000012"
+  },
+  {
+    "id": "minimax/minimax-m2.7",
+    "name": "MiniMax: MiniMax M2.7",
+    "pricing_prompt": "0.0000003",
+    "pricing_completion": "0.0000012"
+  },
+  {
+    "id": "minimax/minimax-m2.5",
+    "name": "MiniMax: MiniMax M2.5",
+    "pricing_prompt": "0.0000003",
+    "pricing_completion": "0.0000012"
+  },
+  {
+    "id": "minimax/minimax-m2-her",
+    "name": "MiniMax: MiniMax M2-her",
+    "pricing_prompt": "0.0000003",
+    "pricing_completion": "0.0000012"
+  },
+  {
+    "id": "minimax/minimax-m2.1",
+    "name": "MiniMax: MiniMax M2.1",
+    "pricing_prompt": "0.0000003",
+    "pricing_completion": "0.0000012"
+  },
+  {
+    "id": "minimax/minimax-m2",
+    "name": "MiniMax: MiniMax M2",
+    "pricing_prompt": "0.000000255",
+    "pricing_completion": "0.00000102"
+  },
+  {
+    "id": "minimax/minimax-m1",
+    "name": "MiniMax: MiniMax M1",
+    "pricing_prompt": "0.00000055",
+    "pricing_completion": "0.0000022"
+  },
+  {
+    "id": "minimax/minimax-01",
+    "name": "MiniMax: MiniMax-01",
+    "pricing_prompt": "0.0000002",
+    "pricing_completion": "0.0000011"
+  }
+]
+```
+- **查驗結論**：
+  1. `stealth/space-bunny-alpha` 完全下架（未返回任何包含 space-bunny 之模型）。
+  2. 2026-10-20 原存之免費端點 `minimax/minimax-m3.1-flash:free` 亦已徹底下架（OpenRouter 模型清單中無任何 `:free` 後綴之 MiniMax 端點）。
+  3. 目前僅保留付費端點 `minimax/minimax-m3.1-flash`（定價：輸入 `$0.00000015` / token 即 `$0.15` / 1M tokens，輸出 `$0.0000006` / token 即 `$0.60` / 1M tokens）。
+  4. 依退回規範，確認免費版下架即改以 `close` 關閉任務。回流升級除錯機制已完全由 commit `66e8473` 與 Claude Haiku/Opus 實測落地。
 ## 2. 拿到金鑰後怎麼補測
 
 把金鑰設在環境變數（不要寫進任何檔案或信件），跑這幾個最小探測：
