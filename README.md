@@ -139,6 +139,8 @@ Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs
 | [SkillSpector](https://github.com/SanHsien/SkillSpector) | 技能供應鏈掃描 | T-20261018-18 |
 | [agent-advisor](https://github.com/SanHsien/agent-advisor) | 獨立審查員軌道、報錯回流再派工 | T-20261017-32 |
 
+agent-governance-toolkit（AGT）由環境變數 `AGENT_GOVERNANCE_PATH` 或預設路徑 `C:/GitHub/agent-governance-toolkit` 載入。收件端 `dispatch.verify` 要求治理檢查（`governance`、`no_credentials`、`blocked_paths`、`max_files`、`scan_subprocesses`、`strict`）但 AGT 載入失敗時，閘門回 `unverified`、不放行；沒有 AGT 的環境要明寫 `"governance_fallback": "builtin"` 才會降級成內建簡化檢查（報告標「降級」，危險指令掃描標「未執行」）。詳見 [SPEC.md](SPEC.md) 第 11 節。
+
 `[Private Repo: …]` 是私人 repo 的公開別名，真實名稱不寫在任何公開檔案裡。
 
 ## 測試

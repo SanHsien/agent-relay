@@ -139,6 +139,8 @@ The pipeline is organized into three phases, reusing the repositories below. The
 | [SkillSpector](https://github.com/SanHsien/SkillSpector) | Skill supply-chain scanning | T-20261018-18 |
 | [agent-advisor](https://github.com/SanHsien/agent-advisor) | Independent reviewer track and failure escalation re-dispatch | T-20261017-32 |
 
+agent-governance-toolkit (AGT) is loaded from the `AGENT_GOVERNANCE_PATH` environment variable or the default path `C:/GitHub/agent-governance-toolkit`. If the receiver's `dispatch.verify` requests governance checks (`governance`, `no_credentials`, `blocked_paths`, `max_files`, `scan_subprocesses`, `strict`) but AGT cannot be loaded, the gate returns `unverified` and does not pass; environments without AGT must explicitly set `"governance_fallback": "builtin"` to degrade to simplified built-in checks (reported as degraded; the subprocess scan is reported as not run). See [SPEC.en.md](SPEC.en.md) Section 11.
+
 `[Private Repo: …]` denotes a public alias for a private repository; real private repository names never appear in public files.
 
 ## Testing

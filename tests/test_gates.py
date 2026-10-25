@@ -302,6 +302,81 @@ class GovernancePolicyTests(unittest.TestCase):
         self.assertTrue(any("通過" in n for n in res.notes))
 
 
+class GovernanceWithoutAgtTests(unittest.TestCase):
+    """AGT missing must fail closed; only an explicit governance_fallback="builtin" degrades."""
+
+    FAKE_RUN = {"exit": 0, "seconds": 0, "log": "", "sha256": "", "tail": ""}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worktree = Path(self.tmp.name)
+        (self.worktree / "clean.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        patch = mock.patch.object(gates, "load_governance_toolkit", return_value=False)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def run_check(self, settings):
+        settings = {"command": [sys.executable, "-c", "pass"], **settings}
+        with mock.patch.object(gates, "run_logged", return_value=self.FAKE_RUN) as run:
+            res = gates.check(self.worktree, self.worktree, "HEAD", ["clean.py"], self.worktree / "run", settings, False)
+        return res, run
+
+    def test_required_governance_without_agt_is_not_passed(self):
+        res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance": True, "scan_subprocesses": True})
+        self.assertFalse(res.passed)
+        self.assertEqual(res.status, "unverified")
+        text = "\n".join(res.notes)
+        self.assertIn("AGT 未載入，無法執行", text)
+        for name in ("路徑邊界", "機密外洩", "危險指令"):
+            self.assertIn(name, text)
+        self.assertNotIn("通過", text)
+
+    def test_check_gate_blocks_when_agt_missing(self):
+        res, run = self.run_check({"governance": True})
+        self.assertEqual(res.status, "unverified")
+        self.assertFalse(res.passed)
+        run.assert_not_called()  # the verification command never ran
+
+    def test_scan_subprocesses_alone_triggers_governance(self):
+        res, _ = self.run_check({"scan_subprocesses": True})
+        self.assertEqual(res.status, "unverified")
+
+    def test_explicit_builtin_fallback_is_labelled_degraded(self):
+        settings = {"governance": True, "scan_subprocesses": True, "governance_fallback": "builtin"}
+        res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], settings)
+        self.assertTrue(res.passed)
+        text = "\n".join(res.notes)
+        self.assertIn("降級：內建簡化檢查", text)
+        self.assertIn("危險指令審查：未執行", text)
+        self.assertNotIn("危險指令審查：通過", text)
+
+    def test_builtin_fallback_still_blocks_bad_input(self):
+        (self.worktree / ".env").write_text("A=1\n", encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, [".env"], {"governance_fallback": "builtin"})
+        self.assertEqual(res.status, "policy-violation")
+        (self.worktree / "k.py").write_text("K = 'ghp_" + "a" * 20 + "'\n", encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["k.py"], {"governance_fallback": "builtin"})
+        self.assertEqual(res.status, "policy-violation")
+
+    def test_unknown_fallback_value_does_not_degrade(self):
+        res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance_fallback": "yes"})
+        self.assertEqual(res.status, "unverified")
+
+    def test_nested_governance_dict_fallback_in_check(self):
+        res, _ = self.run_check({"governance": {"governance_fallback": "builtin"}})
+        self.assertEqual(res.status, "ok")
+        self.assertIn("降級：內建簡化檢查", "\n".join(res.notes))
+
+    def test_governance_not_requested_is_unchanged(self):
+        res, _ = self.run_check({})
+        self.assertEqual(res.status, "ok")
+        text = "\n".join(res.notes)
+        self.assertNotIn("AGT", text)
+        self.assertNotIn("降級", text)
+        self.assertIn("空殼檢查：通過", text)
+
+
 class DispatchGovernanceIntegrationTests(DispatchGateTests):
     def test_dispatch_blocks_credential_leak(self):
         key = "sk-" + "c" * 25

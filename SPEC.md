@@ -344,6 +344,7 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
 - `by_repo`：例如 `{"by_repo": {"harness-guard": ["python", "tests/run-tests.py"]}}`，用 repo 資料夾名稱指定那個 repo 的指令，優先於 `command`。
 - 上面三種判斷都只讀**主工作目錄**的檔案，不讀工人的分支，所以工人改不了驗證方式。
 - `require_verification: true` 時，沒有設定閘門就回 `unverified`（不 commit）；信件要求 TDD 但收件端沒設閘門也一樣。沒設這些時閘門是關的，行為和以前一樣。
+- **治理檢查（agent-governance-toolkit，AGT）**：verify 設了 `governance`、`no_credentials`、`blocked_paths`、`max_files`、`scan_subprocesses` 或 `strict` 就會跑路徑邊界／機密外洩／危險指令三項檢查。AGT 由環境變數 `AGENT_GOVERNANCE_PATH` 或預設路徑 `C:/GitHub/agent-governance-toolkit` 載入。要求了治理但 AGT 載入失敗時**不放行**：結果 `unverified`（檢查沒執行，不是違規），報告寫「AGT 未載入，無法執行 XX 檢查」，驗證指令也不會跑。只有明寫 `"governance_fallback": "builtin"` 才降級用內建簡化檢查（fnmatch 路徑比對、只搜 `sk-`／`ghp_`／`AKIA`），報告標「降級：內建簡化檢查」；危險指令掃描沒有內建替代，標「未執行」，不算通過。
 - 閘門會執行工人寫的測試程式，等同你自己手動跑測試；只對信任的寄件者與 repo 開啟。
 - 開了閘門（或要求 TDD）而工人沒有正常結束（failed／timeout）時，relay 不 commit 半成品。
 - **已知限制**：紅燈只看 exit code，看不出失敗原因（測試 import 了工人新加的模組，在 base 上 ImportError 也算紅燈）；暫時 worktree 沒有被 gitignore 的東西（.venv、node_modules、建置產物），依賴它們的指令在 base 就會失敗，結果是 tdd-not-proven（偏向擋下）。空殼檢查只看 Python，抓不到 lambda 或其他語言。被 gitignore 的新檔案不在變更清單裡，防護檢查看不到；空殼比對以「函式名稱＋本體」判斷，不分所在類別（base 某類別已有的 `__init__: pass`，會讓另一個類別新加的同樣空殼漏網）。工人仍可在受保護清單以外的地方動手腳讓測試空過（例如改測試 helper），閘門擋的是「沒重現就修」和「沒跑測試就宣稱完成」，不是蓄意欺騙；合併前仍要看 diff。

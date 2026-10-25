@@ -203,6 +203,7 @@ def find_stubs(worktree: Path, changed: list[str], base: str | None = None, test
 # ---------------------------------------------------------------- governance (AGT)
 
 
+FALLBACK_BUILTIN = "builtin"  # settings["governance_fallback"]: the only value that allows degrading without AGT
 DEFAULT_BLOCKED_PATHS = (
     "*.env", "*.env.*", "**/.env", "**/.env.*",
     "**/id_rsa*", "**/*.pem", "**/*.key", "**/*.pfx",
@@ -273,16 +274,33 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
       1. Diff scope & path boundaries (DiffPolicy): file count, line count, blocked paths
       2. Secret & credential leak prevention (CredentialRedactor): detect API keys / tokens
       3. Dangerous subprocess & system calls (CodeScanner): static AST inspection
+
+    Fail closed: when the checks were requested but AGT cannot be loaded, the result is
+    "unverified" (the checks did not run, so nothing may be called a pass). Only an explicit
+    governance_fallback = "builtin" allows the simplified built-in checks; the notes then say
+    "降級：內建簡化檢查", and the subprocess scan (no built-in substitute) is reported "未執行".
     """
-    load_governance_toolkit()
+    agt = load_governance_toolkit()
     notes = []
+    want_credentials = bool(settings.get("no_credentials", True))
+    want_scan = bool(settings.get("scan_subprocesses", False) or settings.get("strict", False))
+    degraded = False
+
+    if not agt:
+        if settings.get("governance_fallback") != FALLBACK_BUILTIN:
+            missing = ["路徑邊界"] + (["機密外洩"] if want_credentials else []) + (["危險指令審查"] if want_scan else [])
+            return GateResult("unverified", [f"AGT 未載入，無法執行{name}檢查" for name in missing]
+                              + ["無真實檢查證據不放行；請安裝 agent-governance-toolkit（環境變數 AGENT_GOVERNANCE_PATH 或"
+                                 "預設路徑 C:/GitHub/agent-governance-toolkit），或明確設定 governance_fallback=\"builtin\" 降級"])
+        degraded = True
+        notes.append("降級：內建簡化檢查（AGT 未載入，governance_fallback=builtin）")
 
     # 1. Path Boundary / Diff Policy
     blocked = list(settings.get("blocked_paths") or DEFAULT_BLOCKED_PATHS)
     max_files = settings.get("max_files")
     max_lines = settings.get("max_lines")
 
-    if _DiffPolicy is not None and _DiffFile is not None:
+    if not degraded:
         diff_files = []
         for rel in changed:
             lines = 0
@@ -305,10 +323,10 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
         if max_files and len(changed) > max_files:
             return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：變更檔案數 {len(changed)} 超過上限 {max_files}"])
 
-    notes.append("路徑邊界政策：通過")
+    notes.append("路徑邊界政策：通過" + ("（降級：內建簡化檢查）" if degraded else ""))
 
     # 2. Secret / Credential Leak Policy
-    if settings.get("no_credentials", True):
+    if want_credentials:
         for rel in changed:
             target = worktree / rel
             if not target.is_file():
@@ -318,7 +336,7 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
             except OSError:
                 continue
 
-            if _CredentialRedactor is not None:
+            if not degraded:
                 types = _CredentialRedactor.detect_credential_types(content)
                 if types:
                     return GateResult("policy-violation", [
@@ -330,10 +348,12 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
                         f"治理政策違規（機密外洩）：檔案 {rel} 檢測到疑似敏感金鑰特徵，已拒絕放行"
                     ])
 
-        notes.append("機密外洩防護：通過")
+        notes.append("機密外洩防護：通過" + ("（降級：內建簡化檢查，只搜 sk-／ghp_／AKIA）" if degraded else ""))
 
     # 3. Dangerous Subprocess / Code Scanner Policy
-    if settings.get("scan_subprocesses", False) or settings.get("strict", False):
+    if want_scan and degraded:
+        notes.append("危險指令審查：未執行（AGT 未載入，內建檢查沒有替代掃描）")
+    elif want_scan:
         globs = tuple(settings.get("test_globs") or TEST_GLOBS)
         for rel in changed:
             if not rel.endswith(".py") or is_test_file(rel, globs):
@@ -464,8 +484,11 @@ def check(repo: Path, worktree: Path, base: str, changed: list[str], run_dir: Pa
             return GateResult("stub-rejected", ["新加的空殼函式（只有 pass／...／return None／raise NotImplementedError）："
                                                 + "、".join(stubs[:10])])
         notes.append("空殼檢查：通過")
-    if settings.get("governance") or "no_credentials" in settings or "blocked_paths" in settings or "max_files" in settings:
+    if (settings.get("governance") or "no_credentials" in settings or "blocked_paths" in settings
+            or "max_files" in settings or settings.get("scan_subprocesses") or settings.get("strict")):
         gov_settings = settings.get("governance") if isinstance(settings.get("governance"), dict) else settings
+        if "governance_fallback" not in gov_settings and "governance_fallback" in settings:
+            gov_settings = {**gov_settings, "governance_fallback": settings["governance_fallback"]}
         gov_res = evaluate_governance_policy(worktree, changed, gov_settings)
         if not gov_res.passed:
             return gov_res
