@@ -18,6 +18,10 @@ from agent_relay import dispatch, envelope, gates  # noqa: E402
 from agent_relay.store import Store  # noqa: E402
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.com", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@e.com"}
+# Without a real AGT (e.g. CI) the AGT-backed tests are skipped and the rest use the explicit built-in fallback.
+AGT_AVAILABLE = gates.load_governance_toolkit()
+NEEDS_AGT = unittest.skipUnless(AGT_AVAILABLE, "agent-governance-toolkit is not installed")
+FALLBACK = {} if AGT_AVAILABLE else {"governance_fallback": "builtin"}
 UNITTEST = [sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"]
 
 
@@ -252,6 +256,7 @@ class GovernancePolicyTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.worktree = Path(self.tmp.name)
 
+    @NEEDS_AGT
     def test_governance_toolkit_discovery_and_load(self):
         loaded = gates.load_governance_toolkit()
         self.assertTrue(loaded)
@@ -261,7 +266,7 @@ class GovernancePolicyTests(unittest.TestCase):
 
     def test_path_boundary_blocked_paths(self):
         (self.worktree / ".env").write_text("SECRET=123\n", encoding="utf-8")
-        res = gates.evaluate_governance_policy(self.worktree, [".env"], {"governance": True})
+        res = gates.evaluate_governance_policy(self.worktree, [".env"], {"governance": True, **FALLBACK})
         self.assertFalse(res.passed)
         self.assertEqual(res.status, "policy-violation")
         self.assertTrue(any("路徑邊界" in n for n in res.notes))
@@ -270,7 +275,7 @@ class GovernancePolicyTests(unittest.TestCase):
         for i in range(5):
             (self.worktree / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
         changed = [f"f{i}.py" for i in range(5)]
-        res = gates.evaluate_governance_policy(self.worktree, changed, {"max_files": 3})
+        res = gates.evaluate_governance_policy(self.worktree, changed, {"max_files": 3, **FALLBACK})
         self.assertFalse(res.passed)
         self.assertEqual(res.status, "policy-violation")
         self.assertTrue(any("路徑邊界" in n and ("files:" in n or "超過上限" in n) for n in res.notes))
@@ -278,7 +283,7 @@ class GovernancePolicyTests(unittest.TestCase):
     def test_credential_leak_detection(self):
         key = "sk-" + "a" * 25
         (self.worktree / "config.py").write_text(f"API_KEY = '{key}'\n", encoding="utf-8")
-        res = gates.evaluate_governance_policy(self.worktree, ["config.py"], {"governance": True})
+        res = gates.evaluate_governance_policy(self.worktree, ["config.py"], {"governance": True, **FALLBACK})
         self.assertFalse(res.passed)
         self.assertEqual(res.status, "policy-violation")
         self.assertTrue(any("機密外洩" in n for n in res.notes))
@@ -286,6 +291,7 @@ class GovernancePolicyTests(unittest.TestCase):
         for note in res.notes:
             self.assertNotIn(key, note)
 
+    @NEEDS_AGT
     def test_dangerous_subprocess_scan(self):
         code = "import subprocess\nsubprocess.Popen(['notepad.exe'])\n"
         (self.worktree / "agent.py").write_text(code, encoding="utf-8")
@@ -294,6 +300,7 @@ class GovernancePolicyTests(unittest.TestCase):
         self.assertEqual(res.status, "policy-violation")
         self.assertTrue(any("危險指令" in n for n in res.notes))
 
+    @NEEDS_AGT
     def test_governance_policy_passes_clean_code(self):
         (self.worktree / "clean.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
         res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance": True})
@@ -380,7 +387,7 @@ class GovernanceWithoutAgtTests(unittest.TestCase):
 class DispatchGovernanceIntegrationTests(DispatchGateTests):
     def test_dispatch_blocks_credential_leak(self):
         key = "sk-" + "c" * 25
-        self.cfg["dispatch"]["verify"]["governance"] = True
+        self.cfg["dispatch"]["verify"].update(governance=True, **FALLBACK)
         worker_code = f"open('calc.py','a').write('\\nAPI_KEY = \"{key}\"\\n')"
         report, body = self.go(worker_code)
         self.assertEqual(report["status"], "policy-violation")
@@ -389,7 +396,7 @@ class DispatchGovernanceIntegrationTests(DispatchGateTests):
         self.assertIn("沒有 commit", report["commit"])
 
     def test_dispatch_blocks_forbidden_path(self):
-        self.cfg["dispatch"]["verify"]["governance"] = True
+        self.cfg["dispatch"]["verify"].update(governance=True, **FALLBACK)
         worker_code = "open('.env','w').write('TOKEN=123\\n')"
         report, body = self.go(worker_code)
         self.assertEqual(report["status"], "policy-violation")
