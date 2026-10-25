@@ -23,7 +23,7 @@ App sidecar（每 5 分鐘 pull）<----------+
 - 本接法不需要增加或修改 hooks。原有 guard、停用設定及工人權限維持原值。
 - App 必須開著，sidecar 才會執行。這不是關機後也能喚醒 App 的 Windows 服務。
 - `relay send --run agy` 是另一條路：開**新**的 CLI 工人，仍依 SPEC §7 使用 `plan + sandbox`。不適用本頁的既有會話收信。
-- 若已經在 Antigravity App 會話內執行，且希望在 **Antigravity Desktop 左側對話列表直接建立一個使用者看得見的頂層新對話**（`nestingDepth: 0`）派工，則不走 `invoke_subagent`（那只會建立 `nestingDepth: 1` 的子面板對話），也不走 `agentapi.bat`（避免 `cmd.exe` 截斷換行），而是直接呼叫原生 `<App 的 language_server.exe> agentapi new-conversation --title="<標題>" "<prompt>"`，由回傳 JSON 取得 `conversationId` 附上 `[<標題>](conversation://<id>)` 連結，並讓新對話完工後以 `send_message` 工具回報主對話。
+- 若已經在 Antigravity App 會話內執行，且希望在 **Antigravity Desktop 左側對話列表直接建立一個使用者看得見的頂層新對話**（`nestingDepth: 0`）派工，則不走 `invoke_subagent`（那只會建立 `nestingDepth: 1` 的子面板對話），也不走 `agentapi.bat`（避免 `cmd.exe` 截斷換行），而是直接呼叫原生 `<App 的 language_server.exe> agentapi new-conversation [--model=<flash_lite|flash|pro>] --title="<標題>" "<prompt>"`（如需 Flash 派工指定 `--model=flash` 即映射至 `gemini-3.8-flash-tiered`，勿帶 `-high` 後綴），由回傳 JSON 取得 `conversationId` 附上 `[<標題>](conversation://<id>)` 連結，並讓新對話完工後以 `send_message` 工具回報主對話。
 - 既有會話沿用自己的工作目錄，不自動建立獨立 worktree。多個 Agent 共用 checkout 時，可能有人把別人的未提交檔案一起提交；需要並行施工時，先為收件會話建立專用 worktree，並將 `repos` 綁定到該目錄。通知與簽章不能代替檔案範圍隔離。
 
 ## 1. 建立獨立收件端 home
