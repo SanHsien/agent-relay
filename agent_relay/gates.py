@@ -300,17 +300,20 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
     max_files = settings.get("max_files")
     max_lines = settings.get("max_lines")
 
+    # Same line semantics on both paths: each changed file counts its current line count as additions.
+    line_counts = {}
+    for rel in changed:
+        lines = 0
+        target = worktree / rel
+        if target.is_file():
+            try:
+                lines = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+            except OSError:
+                lines = 0
+        line_counts[rel] = lines
+
     if not degraded:
-        diff_files = []
-        for rel in changed:
-            lines = 0
-            target = worktree / rel
-            if target.is_file():
-                try:
-                    lines = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
-                except OSError:
-                    lines = 0
-            diff_files.append(_DiffFile(path=rel.replace("\\", "/"), additions=lines, deletions=0))
+        diff_files = [_DiffFile(path=rel.replace("\\", "/"), additions=n, deletions=0) for rel, n in line_counts.items()]
         policy = _DiffPolicy(max_files=max_files, max_lines=max_lines, blocked_paths=blocked)
         result = policy.evaluate(diff_files)
         if not result.allowed:
@@ -322,8 +325,13 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
                 return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：檔案 {rel} 命中禁止路徑規則"])
         if max_files and len(changed) > max_files:
             return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：變更檔案數 {len(changed)} 超過上限 {max_files}"])
+        if max_lines is not None:
+            total_lines = sum(line_counts.values())
+            if total_lines > max_lines:
+                return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：變更行數 {total_lines} 超過上限 {max_lines}"])
 
-    notes.append("路徑邊界政策：通過" + ("（降級：內建簡化檢查）" if degraded else ""))
+    notes.append("路徑邊界政策：通過" + ("（降級：內建簡化檢查，已檢查禁止路徑" + ("、max_files" if max_files else "")
+                                       + ("、max_lines" if max_lines is not None else "") + "）" if degraded else ""))
 
     # 2. Secret / Credential Leak Policy
     if want_credentials:
@@ -485,7 +493,7 @@ def check(repo: Path, worktree: Path, base: str, changed: list[str], run_dir: Pa
                                                 + "、".join(stubs[:10])])
         notes.append("空殼檢查：通過")
     if (settings.get("governance") or "no_credentials" in settings or "blocked_paths" in settings
-            or "max_files" in settings or settings.get("scan_subprocesses") or settings.get("strict")):
+            or "max_files" in settings or "max_lines" in settings or settings.get("scan_subprocesses") or settings.get("strict")):
         gov_settings = settings.get("governance") if isinstance(settings.get("governance"), dict) else settings
         if "governance_fallback" not in gov_settings and "governance_fallback" in settings:
             gov_settings = {**gov_settings, "governance_fallback": settings["governance_fallback"]}

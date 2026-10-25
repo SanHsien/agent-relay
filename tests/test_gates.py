@@ -292,6 +292,15 @@ class GovernancePolicyTests(unittest.TestCase):
             self.assertNotIn(key, note)
 
     @NEEDS_AGT
+    def test_agt_path_max_lines(self):
+        (self.worktree / "big.py").write_text("x = 1\n" * 50, encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["big.py"], {"max_lines": 10})
+        self.assertEqual(res.status, "policy-violation")
+        (self.worktree / "small.py").write_text("x = 1\n" * 5, encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["small.py"], {"max_lines": 10})
+        self.assertTrue(res.passed)
+
+    @NEEDS_AGT
     def test_dangerous_subprocess_scan(self):
         code = "import subprocess\nsubprocess.Popen(['notepad.exe'])\n"
         (self.worktree / "agent.py").write_text(code, encoding="utf-8")
@@ -374,6 +383,32 @@ class GovernanceWithoutAgtTests(unittest.TestCase):
         res, _ = self.run_check({"governance": {"governance_fallback": "builtin"}})
         self.assertEqual(res.status, "ok")
         self.assertIn("降級：內建簡化檢查", "\n".join(res.notes))
+
+    def _big(self, n):
+        (self.worktree / "big.py").write_text("x = 1\n" * n, encoding="utf-8")
+
+    def test_builtin_fallback_blocks_over_max_lines(self):
+        self._big(50)
+        res = gates.evaluate_governance_policy(self.worktree, ["big.py"], {"max_lines": 10, "governance_fallback": "builtin"})
+        self.assertEqual(res.status, "policy-violation")
+        self.assertIn("超過上限", "\n".join(res.notes))
+
+    def test_builtin_fallback_within_max_lines_reports_checked(self):
+        self._big(5)
+        res = gates.evaluate_governance_policy(self.worktree, ["big.py"], {"max_lines": 10, "governance_fallback": "builtin"})
+        self.assertTrue(res.passed)
+        self.assertIn("max_lines", "\n".join(res.notes))
+
+    def test_builtin_report_does_not_claim_unchecked_limits(self):
+        res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance": True, "governance_fallback": "builtin"})
+        self.assertNotIn("max_lines", "\n".join(res.notes))
+
+    def test_max_lines_alone_triggers_governance(self):
+        res, run = self.run_check({"max_lines": 10})
+        self.assertEqual(res.status, "unverified")
+        run.assert_not_called()
+        res, _ = self.run_check({"max_lines": 1, "governance_fallback": "builtin"})
+        self.assertEqual(res.status, "policy-violation")
 
     def test_governance_not_requested_is_unchanged(self):
         res, _ = self.run_check({})
