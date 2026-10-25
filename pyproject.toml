@@ -9,7 +9,7 @@ license = { text = "MIT" }
 agent-relay = "agent_relay.cli:main"
 
 [build-system]
-requires = ["setuptools>=68"]  # freshness-hold: build backend only; 68 is the first release with the pyproject-only packaging this repo uses, raised only when the build needs a newer one
+requires = ["setuptools>=68"]  # freshness-hold: build backend only; 68 already supports the pyproject-only build this repo uses; raise it only when the build needs a newer release
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]

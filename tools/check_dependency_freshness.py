@@ -394,7 +394,7 @@ def render_markdown(
             "## Review policy",
             "",
             "0. Do not raise a declared floor just to turn the report green: the floor is a",
-            "   compatibility promise (`requires-python >= 3.10`), not a mute button. Raise",
+            "   compatibility promise, not a mute button. Raise",
             "   it only when the code really needs the newer release.",
             "1. Read the release notes, and check the supported Python versions.",
             "2. Run `pwsh -NoProfile -File tools/dev_check.ps1` before raising anything.",
