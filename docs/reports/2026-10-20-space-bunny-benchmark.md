@@ -132,4 +132,4 @@ curl.exe -s -o NUL -w "connect %{time_connect}s ttfb %{time_starttransfer}s tota
 - 便宜工人在**機械、範圍清楚**的任務上一次就過，成本約 $0.02；這才是省錢的來源。
 - 便宜工人在**規格比工單寫的更多**時，會只做表面（本例），這時靠驗收閘門抓出來、再交給強模型，總成本是 $0.019＋$0.685≈$0.70。這次沒有讓 opus 從頭單獨做同一題，所以「是否比直接用強模型貴」只能推估：第 2 輪是在 haiku 已修一半的基礎上做的，單獨跑 opus 的成本應該相近或略高。換到的是一份「為什麼第一輪不夠」的紀錄。
 - 所以順序應該是：先由 `runtime auto`（SPEC 第 10 節）把明顯困難的工單直接派給強模型，機械工單派便宜工人，再用回流升級（SPEC 第 12 節）接住判斷失誤的那一部分。
-- ~~MiniMax M3.1 Flash 放進 low 層~~：主人不使用中國服務，不採用。low 層維持 haiku／codex low／agy。
+- ~~MiniMax M3.1 Flash 放進 low 層~~：維護者不使用中國服務，不採用。low 層維持 haiku／codex low／agy。

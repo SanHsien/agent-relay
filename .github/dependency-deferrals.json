@@ -1,0 +1,4 @@
+{
+  "_comment": "Reviewed-but-not-now decisions for tools/check_dependency_freshness.py. A deferral is for a floor that would genuinely break something if raised right now; each entry needs deferredLatest so it expires by itself once upstream moves past the release it was reviewed against. A permanent policy belongs on the declaring line as `# freshness-hold:` instead.",
+  "deferrals": {}
+}

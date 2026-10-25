@@ -63,7 +63,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - **寫入要原子化**：先寫同目錄的暫存檔（`.tmp-` 開頭），再改名成 `<id>.json`。讀取端忽略 `.tmp-*`，git 也不提交它們。
 - **檔案要名實相符**：檔名不等於 `<id>.json`、或 `to` 不等於所在信箱的檔案，讀取端一律略過（不然一個檔可以冒用別封信的 id，讓那封的門鈴不響）。
 - **狀態轉換只用改名**：`new → cur → done`，內容不改。所以兩台機器的 git 合併不會衝突在同一行。
-- **一個信箱只有一個收件人**：同一封信只由收件信箱的主人搬動。寄件人寫完 `new/` 就不再碰。
+- **一個信箱只有一個收件人**：同一封信只由收件信箱的擁有者搬動。寄件人寫完 `new/` 就不再碰。
 - 同一信箱內 `id` 重複要拒收。
 
 ## 3. 跨機器傳送（git）
@@ -177,9 +177,9 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - gateway 的網址與金鑰在**執行當下**從 3P 設定檔讀取：預設是 `%LOCALAPPDATA%\Claude-3p\configLibrary\_meta.json` 裡名為 opencodex 的設定，或目前套用中的設定。也可以用 `dispatch.claude_3p.profile` 指定設定檔。
   - 讀到的值放進工人的 `ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY`，並移除 `ANTHROPIC_AUTH_TOKEN`，避免改用官方登入。金鑰不會寫進 relay 設定、信件、argv 或 log。
   - 必須指定模型：信件的 `model`，或收件端的 `dispatch.claude_3p.model`。模型 id 以 gateway 解析的結果為準，不能只看顯示名稱。
-  - **只用非 Anthropic 模型**：claude-3p 的用途，是用 gateway 上主人其他訂閱的模型，例如 OpenAI 的 `gpt-6.1-sol`、Google 的 `google-antigravity/gemini-3.8-flash`。下列三類一律回 `refused`：
+  - **只用非 Anthropic 模型**：claude-3p 的用途，是用 gateway 上維護者其他訂閱的模型，例如 OpenAI 的 `gpt-6.1-sol`、Google 的 `google-antigravity/gemini-3.8-flash`。下列三類一律回 `refused`：
     - Claude 模型（`claude-*`、`anthropic/*`）：經 gateway 跑等於花官方額度，請改用 `--run claude`；
-    - 主人不使用的供應商：kimi、minimax、qwen、deepseek、glm 等；
+    - 維護者不使用的供應商：kimi、minimax、qwen、deepseek、glm 等；
     - 由路由器自己挑模型的入口：`combo/*`、`*/auto*`，可能挑到 Claude。
 
     `setup-local` 的預設模型是 `gpt-6.1-sol`。
@@ -187,8 +187,8 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - **假造的工具呼叫**：工人的回報裡若出現用文字寫出的工具呼叫標記，例如 `<function_calls>`、`<invoke name=`，表示它可能沒有真的讀檔、自己編了輸出。實測 claude-3p 曾發生一次。回信會加上警告，`result.warnings` 為 `["fake-tool-calls"]`；唯讀工單的 prompt 也會要求先用工具讀實際檔案，結論附檔名與行號。
 - **唯讀（plan）claude 工人的工具**：只給 `--tools Read,Glob,Grep`。agent-cortex 的唯讀組法原本傳 `--tools ""`，等於一個工具都不給；實測時，工人因此讀不到任何檔案。寫入仍由 plan 權限模式擋下。
 - **claude 工人的隔離**（`claude` 與 `claude-3p` 都適用）：
-  - 加上 `--strict-mcp-config --mcp-config <空清單>`：工人拿不到主人的 MCP 伺服器。實測曾看到工人試著呼叫主人的 GitHub、爬網、搜尋 MCP。
-  - 加上 `--setting-sources project,local`：不載入主人使用者層的 hooks 與 plugins。
+  - 加上 `--strict-mcp-config --mcp-config <空清單>`：工人拿不到維護者的 MCP 伺服器。實測曾看到工人試著呼叫維護者的 GitHub、爬網、搜尋 MCP。
+  - 加上 `--setting-sources project,local`：不載入維護者使用者層的 hooks 與 plugins。
   - claude-3p 另外加 `--bare`：不載入 CLAUDE.md、不使用自動記憶。官方 claude 不能用 `--bare`，因為它靠 OAuth 登入，而 `--bare` 不讀 OAuth；所以官方 claude 工人仍會載入全域 CLAUDE.md。
 - **hermes**（Hermes Windows desktop 版 CLI）：`hermes.exe -z <短指令> --in <worktree> -t file --usage-file runs/<id>/hermes-usage.json`，可加 `-m`、`--reasoning`。
   - 單次模式 `-z` **會自動略過核可**，所以安全只靠兩道限制：工具組只給 `file`（`read_file`／`write_file`／`patch`／`search_files`，沒有 terminal 和程式執行）；環境變數 `HERMES_WRITE_SAFE_ROOT` 設為 worktree，寫到 worktree 外會被 Hermes 拒絕。plan 模式把寫入根目錄設成 run 目錄下的空資料夾，worktree 對它是唯讀。
@@ -379,7 +379,7 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 - **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。
 - **原封不動的重放**：能推送 store 的人可以把已簽、已完成的信從 `done/` 搬回 `new/`。收件端看自己本機的 `runs/<id>/state.json`，裡面記錄為已回信就拒絕；這份紀錄不在 store 裡。另外，`created_at` 超過 `dispatch.max_age_hours`（預設 168 小時）的派工一律拒絕，用來限制舊信重放的時間窗。
 - **身分綁信箱**：allowed_signers 的 principal 是信箱名，namespace 限 `agent-relay`。某個金鑰被信任為 `mallory`，不代表它能替 `commander` 簽章。
-- **信任清單只在本機**：金鑰清單不放在 store。如果放在 store，能推送 store 的人就能把自己的金鑰加進去。公鑰交換走 store 以外的管道，例如主人親手在兩台機器各執行一次 `relay trust`。
+- **信任清單只在本機**：金鑰清單不放在 store。如果放在 store，能推送 store 的人就能把自己的金鑰加進去。公鑰交換走 store 以外的管道，例如維護者親手在兩台機器各執行一次 `relay trust`。
 - **工具**：只用 OpenSSH 內建的 `ssh-keygen`（Windows 11、Linux、macOS 都有），不需要 GPG。
 - **收件端政策**：`dispatch.require_signature`（預設 `true`）與 `dispatch.senders`（必填）。只在測試環境才關簽章。
 - **設定**：`signing.key` 與 `signing.allowed_signers` 可以改路徑，預設是 `~/.agent-relay/keys/<agent>_ed25519` 與 `~/.agent-relay/allowed_signers`。`trust` 只接受合法的信箱名稱：principal 欄位支援萬用字元與逗號清單，`*` 會讓一把金鑰替所有信箱簽章。
@@ -413,7 +413,7 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 
 - `dispatch.push_branch: true` 才推送。條件是工人正常結束（status ok）、驗收閘門通過或沒設閘門，而且 relay 真的 commit 了。推送前會關掉 hooks。
 - 只推到收件端自己 clone 的 `origin`，信件指定不了遠端。檢查的是 `git remote get-url --push --all origin`，也就是 git 真正會推的每一個網址（含 `pushurl`、`pushInsteadOf`）。每個網址都必須是下列其中一種，否則一律不推送，回信寫明原因：
-  - 主人自己的 GitHub repo，網址要完全符合：`https://github.com/SanHsien/<repo>`、`git@github.com:SanHsien/<repo>` 或 `ssh://git@github.com/SanHsien/<repo>`，可接 `.git`。只比對前綴不夠：`SanHsien/../other/x.git` 會被 libcurl 折疊成別人的 repo。
+  - 維護者自己的 GitHub repo，網址要完全符合：`https://github.com/SanHsien/<repo>`、`git@github.com:SanHsien/<repo>` 或 `ssh://git@github.com/SanHsien/<repo>`，可接 `.git`。只比對前綴不夠：`SanHsien/../other/x.git` 會被 libcurl 折疊成別人的 repo。
   - `dispatch.push_remotes` 明列的遠端（本機路徑要完全相同）。
 - 推送失敗不影響派工的 status；回信的「推送」段落與 `push_error` 會寫明原因，`result` 不會有 `pushed`。
 
@@ -512,8 +512,8 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
   - 本機 clone 的找法：原派工信的 repo 資料夾名稱，到 `accept.repo_roots` 底下找同名的 git repo；找不到就略過，記在 log。
   - 本機前置檢查不通過時（工作目錄不乾淨、分支不對），accept 不會留下任何紀錄，回信維持未結案，`relay status` 看得到，可以手動 `relay accept`。
   - `accept.push: true`：合併後把該分支推送到 origin（`relay accept --push` 同效）。
-    - 推送前用第 14 節同一套規則檢查 origin 的每個 push URL：只推主人自己的 GitHub repo，或 `accept.push_remotes` 列出的遠端；有任何一個不符就不推，合併照樣保留，原因寫進 notes。
-    - hooks 照常執行（這是主人自己的 clone）。推送失敗不影響合併結果。
+    - 推送前用第 14 節同一套規則檢查 origin 的每個 push URL：只推維護者自己的 GitHub repo，或 `accept.push_remotes` 列出的遠端；有任何一個不符就不推，合併照樣保留，原因寫進 notes。
+    - hooks 照常執行（這是維護者自己的 clone）。推送失敗不影響合併結果。
   - `accept.window: true`：在 Windows Terminal 分頁執行；預設在背景執行。
 - **純通知自動結案**（`auto_ack_notes`）：relay accept 寄給收件端的 `accepted:`／`rejected:` 開頭 note 只是通知，`watch` 響完門鈴就自動 ack。
 
