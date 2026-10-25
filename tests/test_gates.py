@@ -246,5 +246,81 @@ class GateReviewTests(DispatchGateTests):
         self.assertEqual(gates.verify_command(Path("."), {"command": 'python -m pytest -k "a b"'})[-1], "a b")
 
 
+class GovernancePolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worktree = Path(self.tmp.name)
+
+    def test_governance_toolkit_discovery_and_load(self):
+        loaded = gates.load_governance_toolkit()
+        self.assertTrue(loaded)
+        self.assertIsNotNone(gates._DiffPolicy)
+        self.assertIsNotNone(gates._CredentialRedactor)
+        self.assertIsNotNone(gates._scan_code_for_subprocesses)
+
+    def test_path_boundary_blocked_paths(self):
+        (self.worktree / ".env").write_text("SECRET=123\n", encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, [".env"], {"governance": True})
+        self.assertFalse(res.passed)
+        self.assertEqual(res.status, "policy-violation")
+        self.assertTrue(any("路徑邊界" in n for n in res.notes))
+
+    def test_path_boundary_max_files(self):
+        for i in range(5):
+            (self.worktree / f"f{i}.py").write_text("x = 1\n", encoding="utf-8")
+        changed = [f"f{i}.py" for i in range(5)]
+        res = gates.evaluate_governance_policy(self.worktree, changed, {"max_files": 3})
+        self.assertFalse(res.passed)
+        self.assertEqual(res.status, "policy-violation")
+        self.assertTrue(any("路徑邊界" in n and ("files:" in n or "超過上限" in n) for n in res.notes))
+
+    def test_credential_leak_detection(self):
+        key = "sk-" + "a" * 25
+        (self.worktree / "config.py").write_text(f"API_KEY = '{key}'\n", encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["config.py"], {"governance": True})
+        self.assertFalse(res.passed)
+        self.assertEqual(res.status, "policy-violation")
+        self.assertTrue(any("機密外洩" in n for n in res.notes))
+        # Ensure raw secret is not leaked in notes
+        for note in res.notes:
+            self.assertNotIn(key, note)
+
+    def test_dangerous_subprocess_scan(self):
+        code = "import subprocess\nsubprocess.Popen(['notepad.exe'])\n"
+        (self.worktree / "agent.py").write_text(code, encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["agent.py"], {"scan_subprocesses": True})
+        self.assertFalse(res.passed)
+        self.assertEqual(res.status, "policy-violation")
+        self.assertTrue(any("危險指令" in n for n in res.notes))
+
+    def test_governance_policy_passes_clean_code(self):
+        (self.worktree / "clean.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance": True})
+        self.assertTrue(res.passed)
+        self.assertEqual(res.status, "ok")
+        self.assertTrue(any("通過" in n for n in res.notes))
+
+
+class DispatchGovernanceIntegrationTests(DispatchGateTests):
+    def test_dispatch_blocks_credential_leak(self):
+        key = "sk-" + "c" * 25
+        self.cfg["dispatch"]["verify"]["governance"] = True
+        worker_code = f"open('calc.py','a').write('\\nAPI_KEY = \"{key}\"\\n')"
+        report, body = self.go(worker_code)
+        self.assertEqual(report["status"], "policy-violation")
+        self.assertIn("機密外洩", body)
+        self.assertNotIn(key, body)
+        self.assertIn("沒有 commit", report["commit"])
+
+    def test_dispatch_blocks_forbidden_path(self):
+        self.cfg["dispatch"]["verify"]["governance"] = True
+        worker_code = "open('.env','w').write('TOKEN=123\\n')"
+        report, body = self.go(worker_code)
+        self.assertEqual(report["status"], "policy-violation")
+        self.assertIn("路徑邊界", body)
+        self.assertIn("沒有 commit", report["commit"])
+
+
 if __name__ == "__main__":
     unittest.main()

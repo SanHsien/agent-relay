@@ -21,6 +21,7 @@ without a test run"; they do not stop a worker set on deceiving them (SPEC 11).
 from __future__ import annotations
 
 import ast
+import fnmatch
 import hashlib
 import json
 import os
@@ -52,7 +53,7 @@ SAFE_GIT = ("-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false")
 
 @dataclass
 class GateResult:
-    # ok | skipped | stub-rejected | tdd-not-proven | verification-failed | unverified | guarded
+    # ok | skipped | stub-rejected | tdd-not-proven | verification-failed | unverified | guarded | policy-violation
     status: str
     notes: list[str] = field(default_factory=list)
     logs: list[dict] = field(default_factory=list)
@@ -199,6 +200,165 @@ def find_stubs(worktree: Path, changed: list[str], base: str | None = None, test
     return found
 
 
+# ---------------------------------------------------------------- governance (AGT)
+
+
+DEFAULT_BLOCKED_PATHS = (
+    "*.env", "*.env.*", "**/.env", "**/.env.*",
+    "**/id_rsa*", "**/*.pem", "**/*.key", "**/*.pfx",
+    "**/secrets/**", "**/.aws/**", "**/.ssh/**", "**/credentials/**"
+)
+
+_AGT_LOADED = False
+_DiffPolicy = None
+_DiffFile = None
+_CredentialRedactor = None
+_scan_code_for_subprocesses = None
+
+
+def load_governance_toolkit() -> bool:
+    """Discover and import agent-governance-toolkit policy and scanning modules."""
+    global _AGT_LOADED, _DiffPolicy, _DiffFile, _CredentialRedactor, _scan_code_for_subprocesses
+    if _AGT_LOADED:
+        return True
+
+    try:
+        from agent_os.diff_policy import DiffPolicy, DiffFile
+        from agent_os.credential_redactor import CredentialRedactor
+        from agent_sandbox.code_scanner import scan_code_for_subprocesses
+        _DiffPolicy, _DiffFile = DiffPolicy, DiffFile
+        _CredentialRedactor = CredentialRedactor
+        _scan_code_for_subprocesses = scan_code_for_subprocesses
+        _AGT_LOADED = True
+        return True
+    except ImportError:
+        pass
+
+    candidates = []
+    env_path = os.environ.get("AGENT_GOVERNANCE_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path("C:/GitHub/agent-governance-toolkit"))
+    repo_root = Path(__file__).resolve().parent.parent
+    candidates.append(repo_root.parent / "agent-governance-toolkit")
+
+    for root in candidates:
+        if root.is_dir():
+            py_root = root / "agent-governance-python"
+            if py_root.is_dir():
+                os_src = py_root / "agent-os" / "src"
+                sandbox_src = py_root / "agent-sandbox" / "src"
+                if os_src.is_dir() and str(os_src) not in sys.path:
+                    sys.path.insert(0, str(os_src))
+                if sandbox_src.is_dir() and str(sandbox_src) not in sys.path:
+                    sys.path.insert(0, str(sandbox_src))
+
+    try:
+        from agent_os.diff_policy import DiffPolicy, DiffFile
+        from agent_os.credential_redactor import CredentialRedactor
+        from agent_sandbox.code_scanner import scan_code_for_subprocesses
+        _DiffPolicy, _DiffFile = DiffPolicy, DiffFile
+        _CredentialRedactor = CredentialRedactor
+        _scan_code_for_subprocesses = scan_code_for_subprocesses
+        _AGT_LOADED = True
+        return True
+    except ImportError:
+        return False
+
+
+def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dict) -> GateResult:
+    """Run runtime governance policies from agent-governance-toolkit.
+
+    Validates:
+      1. Diff scope & path boundaries (DiffPolicy): file count, line count, blocked paths
+      2. Secret & credential leak prevention (CredentialRedactor): detect API keys / tokens
+      3. Dangerous subprocess & system calls (CodeScanner): static AST inspection
+    """
+    load_governance_toolkit()
+    notes = []
+
+    # 1. Path Boundary / Diff Policy
+    blocked = list(settings.get("blocked_paths") or DEFAULT_BLOCKED_PATHS)
+    max_files = settings.get("max_files")
+    max_lines = settings.get("max_lines")
+
+    if _DiffPolicy is not None and _DiffFile is not None:
+        diff_files = []
+        for rel in changed:
+            lines = 0
+            target = worktree / rel
+            if target.is_file():
+                try:
+                    lines = len(target.read_text(encoding="utf-8", errors="replace").splitlines())
+                except OSError:
+                    lines = 0
+            diff_files.append(_DiffFile(path=rel.replace("\\", "/"), additions=lines, deletions=0))
+        policy = _DiffPolicy(max_files=max_files, max_lines=max_lines, blocked_paths=blocked)
+        result = policy.evaluate(diff_files)
+        if not result.allowed:
+            return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：{v}" for v in result.violations])
+    else:
+        for rel in changed:
+            norm_rel = rel.replace("\\", "/")
+            if any(fnmatch.fnmatch(norm_rel, pat) or fnmatch.fnmatch(Path(norm_rel).name, pat) for pat in blocked):
+                return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：檔案 {rel} 命中禁止路徑規則"])
+        if max_files and len(changed) > max_files:
+            return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：變更檔案數 {len(changed)} 超過上限 {max_files}"])
+
+    notes.append("路徑邊界政策：通過")
+
+    # 2. Secret / Credential Leak Policy
+    if settings.get("no_credentials", True):
+        for rel in changed:
+            target = worktree / rel
+            if not target.is_file():
+                continue
+            try:
+                content = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            if _CredentialRedactor is not None:
+                types = _CredentialRedactor.detect_credential_types(content)
+                if types:
+                    return GateResult("policy-violation", [
+                        f"治理政策違規（機密外洩）：檔案 {rel} 檢測到機密憑證（{', '.join(types)}），已拒絕放行"
+                    ])
+            else:
+                if any(k in content for k in ("sk-", "ghp_", "AKIA")):
+                    return GateResult("policy-violation", [
+                        f"治理政策違規（機密外洩）：檔案 {rel} 檢測到疑似敏感金鑰特徵，已拒絕放行"
+                    ])
+
+        notes.append("機密外洩防護：通過")
+
+    # 3. Dangerous Subprocess / Code Scanner Policy
+    if settings.get("scan_subprocesses", False) or settings.get("strict", False):
+        globs = tuple(settings.get("test_globs") or TEST_GLOBS)
+        for rel in changed:
+            if not rel.endswith(".py") or is_test_file(rel, globs):
+                continue
+            target = worktree / rel
+            if not target.is_file():
+                continue
+            try:
+                content = target.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            if _scan_code_for_subprocesses is not None:
+                violations = _scan_code_for_subprocesses(content)
+                if violations:
+                    first = violations[0]
+                    return GateResult("policy-violation", [
+                        f"治理政策違規（危險指令）：檔案 {rel}:{first.line} 包含禁止的行程調用（{first.pattern}）"
+                    ])
+
+        notes.append("危險指令審查：通過")
+
+    return GateResult("ok", notes)
+
+
 # ---------------------------------------------------------------- running
 
 
@@ -242,6 +402,8 @@ def run_logged(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> di
         log.write(f"\n[exit {code}]\n".encode("utf-8"))
     data = log_file.read_bytes()
     text = data.decode("utf-8", errors="replace")
+    if _CredentialRedactor is not None:
+        text = _CredentialRedactor.redact(text)
     return {"command": " ".join(argv), "exit": code, "seconds": round(time.monotonic() - started, 1),
             "log": str(log_file), "sha256": hashlib.sha256(data).hexdigest(),
             "tail": "\n".join(text.strip().splitlines()[-TAIL_LINES:])}
@@ -302,6 +464,12 @@ def check(repo: Path, worktree: Path, base: str, changed: list[str], run_dir: Pa
             return GateResult("stub-rejected", ["新加的空殼函式（只有 pass／...／return None／raise NotImplementedError）："
                                                 + "、".join(stubs[:10])])
         notes.append("空殼檢查：通過")
+    if settings.get("governance") or "no_credentials" in settings or "blocked_paths" in settings or "max_files" in settings:
+        gov_settings = settings.get("governance") if isinstance(settings.get("governance"), dict) else settings
+        gov_res = evaluate_governance_policy(worktree, changed, gov_settings)
+        if not gov_res.passed:
+            return gov_res
+        notes.extend(gov_res.notes)
     command = verify_command(repo, settings)
     if command is None:
         return GateResult("unverified", notes + ["找不到驗證指令（dispatch.verify.command 或 loop-policy.toml quick_gate）"])
