@@ -166,6 +166,24 @@ class ClaimTests(Base):
         self.assertNotIn(".lock", tracked)
 
 
+class SyncLockTests(unittest.TestCase):
+    def test_breaking_a_stale_lock_never_takes_a_fresh_one(self):
+        """Between 'owner is dead' and the rename, another waiter may have taken the lock: leave it alone."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "agent-relay-sync.lock"
+            lock.write_text("999999-dead", encoding="utf-8")
+            live = "4242-live"
+
+            def dead_then_swapped(pid):
+                lock.write_text(live, encoding="utf-8")  # the winner re-created the lock after we read it
+                return False
+
+            with mock.patch.object(gitsync, "pid_alive", side_effect=dead_then_swapped),                     mock.patch.object(gitsync, "LOCK_WAIT_S", 0.6), mock.patch.object(gitsync.time, "sleep"):
+                with self.assertRaises(gitsync.SyncError):
+                    gitsync._acquire(lock)
+            self.assertEqual(lock.read_text(encoding="utf-8"), live)
+
+
 class DispatchClaimTests(Base):
     def setUp(self):
         super().setUp()

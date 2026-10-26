@@ -77,12 +77,17 @@ def _acquire(lock: Path) -> str:
             return token
         except (FileExistsError, PermissionError):  # Windows: PermissionError while the old file is being deleted
             try:
-                owner = lock.read_text(encoding="utf-8").split("-")[0]
+                seen = lock.read_text(encoding="utf-8")
+                owner = seen.split("-")[0]
                 gone = owner.isdigit() and not pid_alive(int(owner))
                 if gone or time.time() - lock.stat().st_mtime > LOCK_STALE_S:  # its owner crashed
-                    os.replace(lock, lock.with_name(f"{lock.name}.stale-{token}"))
-                    os.unlink(lock.with_name(f"{lock.name}.stale-{token}"))
-                    continue
+                    grave = lock.with_name(f"{lock.name}.stale-{token}")
+                    os.replace(lock, grave)
+                    if grave.read_text(encoding="utf-8") != seen and not lock.exists():
+                        os.replace(grave, lock)  # another waiter took the lock meanwhile: we moved a live one, put it back
+                    else:
+                        os.unlink(grave)
+                        continue
             except OSError:
                 continue
             if time.time() > give_up:
