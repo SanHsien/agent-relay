@@ -58,7 +58,7 @@ The keys and algorithms differ, so **one key cannot satisfy both**. Only two app
 
 ## 4. Prototype Evaluation Conclusion
 
-**Conclusion: no core integration, and no prototype for now.** This work covers only the mapping analysis and an event-`id` computation. It did **not** build an adapter, connect to any relay, or verify a Schnorr signature; what follows is reasoning from the spec, not measurement.
+**Conclusion: no core integration.** A standard-library-only unsigned conversion prototype (Section 6) verifies the mapping and the `id` computation. It did **not** connect to any relay or verify a Schnorr signature; the reasons not to build below are reasoning from the spec, not measurement.
 
 Reasons not to build:
 
@@ -73,5 +73,50 @@ When it becomes worthwhile: a Nostr relay is already running (for example the Bu
 
 - Whether a chosen custom `kind` number collides with a registered one: not verified.
 - NIP-10 (thread markers on `e` tags) and NIP-14 (`subject` tag): not read this time; the table uses custom tags and does not depend on them.
-- Schnorr signing and verification, and a real relay connection: not tested, for the reason in Section 4.
+- Schnorr signing and verification, and a real relay connection: not tested, for the reasons in Sections 4 and 6.
 - The event `id` computation used only the Python standard library (`hashlib`, `json`) and can be recomputed by anyone with the serialization rule in Section 1.
+
+## 6. Prototype (Proof of Concept)
+
+[`tools/nostr_adapter_poc.py`](../tools/nostr_adapter_poc.py): standard library only; converts one envelope to an **unsigned** NIP-01 event and back. The `id` follows the NIP-01 rule (SHA-256 of the compact JSON of `[0,pubkey,created_at,kind,tags,content]`). String escaping implements the NIP-01 rule itself (only `"`, `\`, newline, `\r`, `\t`, `\b` and `\f` are escaped), which is not what Python `json.dumps` does by default. The event `content` is the full envelope JSON, byte-identical to the store copy; the reverse conversion parses it and checks that the `id`, the `relay-*` tags, `kind` and `created_at` agree with the embedded envelope.
+
+How to run (from the repo root):
+
+```text
+python tools/nostr_adapter_poc.py --help
+python tools/nostr_adapter_poc.py demo
+python tools/nostr_adapter_poc.py to-event env.json > ev.json
+python tools/nostr_adapter_poc.py verify ev.json
+python tools/nostr_adapter_poc.py from-event ev.json
+python -m unittest tests.test_nostr_adapter_poc -v
+```
+
+Measured output (2026-10-26, Windows 11, Python 3.14, built-in sample envelope; `kind` 9001-9004 and the all-zero pubkey are placeholders):
+
+```text
+python tools/nostr_adapter_poc.py demo
+serialization: [0,"0000000000000000000000000000000000000000000000000000000000000000",1792977825,9001,[["relay-id","20261026T012345000Z-...
+event id     : a77af769de8bdd0648e8205b70966137568041a3cf907cb2fa7bd95e4549e3b0
+id verifies  : True
+round trip   : True
+sig          : absent (unsigned; no secp256k1 in stdlib)
+
+python tools/nostr_adapter_poc.py verify ev.json            # exit 0
+id OK: claimed=a77af769...e3b0 computed=a77af769...e3b0 (unsigned: sig not checked)
+
+(tamper: change "Hello" to "HELLO" inside content of ev.json, save as ev2.json)
+python tools/nostr_adapter_poc.py verify ev2.json           # exit 1
+id MISMATCH: claimed=a77af769...e3b0 computed=9eacc4c6696da52e94ee755bfbbbb6f6913db291d6520b1d0fb745d00b7e713f (unsigned: sig not checked)
+python tools/nostr_adapter_poc.py from-event ev2.json       # exit 1
+error: event id does not match NIP-01 recomputation (content altered?)
+```
+
+Tests: [`tests/test_nostr_adapter_poc.py`](../tests/test_nostr_adapter_poc.py) has 15 cases: lossless round trip (all four `kind` values), round trip through JSON transport, `id` values for hand-written NIP-01 serialization strings hashed independently with `hashlib` (including characters needing escapes and non-ASCII), tampered `content`/tags detected, and an attacker who recomputes the `id` but leaves tags disagreeing with the embedded envelope is still rejected. The tests were first run against a deliberately broken implementation (`json.dumps` escaping, `verify_id` always true): 5 failed; after restoring, all 15 pass.
+
+Limits:
+
+- **No `sig`**: the standard library has no secp256k1 BIP-340 Schnorr, so the event carries no `sig` and any relay would reject it. The `id` proves content integrity, not origin.
+- **No real relay connection**: the standard library has no WebSocket client or server; hand-rolling RFC 6455 plus a home-made "relay" would only test itself and prove nothing about interop with a real relay, and this work installs no packages and runs no unvetted relay software. Interop (`EVENT`/`OK`/`REQ`) still awaits the minimal acceptance in Section 4.
+- The Section 2 example `id` (`ee6b639e...`) comes from a different sample envelope than the prototype's built-in one, so the two ids differ; both can be recomputed with the same serialization rule.
+- `kind` 9001-9004 are placeholders; collision with registered NIPs is still not verified.
+- Only envelope-to-event mapping and its inverse; no `ack`/state events and no mailbox-to-pubkey table.
