@@ -272,8 +272,8 @@ def checkout(store: Path, repo: Path, holder: str, paths: list[str], ttl_s: floa
         clash = conflicts(paths, active_claims(store, key), holder)
         if clash:
             audit(store, "blocked", repo=rid, holder=holder, paths=paths,
-                  blocked_by=[{"claim": c["id"], "holder": c["holder"], "paths": c["paths"]} for c in clash], **extra)
-            names = "; ".join(f"{c['holder']} 持有 {', '.join(c['paths'])}（到 {c.get('expires_at', '?')}）" for c in clash)
+                  blocked_by=[{"claim": c["id"], "holder": c.get("holder"), "paths": c["paths"]} for c in clash], **extra)
+            names = "; ".join(f"{c.get('holder', '?')} 持有 {', '.join(c['paths'])}（到 {c.get('expires_at', '?')}）" for c in clash)
             raise ClaimConflict(f"範圍和別人簽出的檔案重疊：{names}", clash)
         now = _now()
         claim = {"schema": CLAIM_SCHEMA, "id": f"c{int(now)}{secrets.token_hex(3)}", "repo": rid, "key": key,

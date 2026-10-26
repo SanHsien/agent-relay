@@ -86,6 +86,17 @@ class ClaimTests(Base):
         events = sorted(json.loads(p.read_text(encoding="utf-8"))["event"] for p in (self.store / "audit").rglob("*.json"))
         self.assertEqual(events, ["blocked", "checkout"])
 
+    def test_foreign_claim_without_holder_still_reports_conflict(self):
+        """A synced claim with no holder field must block cleanly, not crash with KeyError."""
+        rid = locks.repo_id(self.repo)
+        key = locks.repo_key(rid)
+        folder = locks.claims_dir(self.store, key)
+        folder.mkdir(parents=True, exist_ok=True)
+        claim = {"schema": locks.CLAIM_SCHEMA, "id": "cforeign", "paths": ["calc.py"], "expires": time.time() + 600}
+        (folder / "cforeign.json").write_text(json.dumps(claim), encoding="utf-8")
+        with self.assertRaises(locks.ClaimConflict):
+            locks.checkout(self.store, self.repo, "relay:b", ["calc.py"], 600)
+
     def test_disjoint_same_holder_and_expired(self):
         locks.checkout(self.store, self.repo, "relay:a", ["calc.py"], 600)
         locks.checkout(self.store, self.repo, "relay:b", ["other.py"], 600)
