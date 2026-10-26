@@ -174,7 +174,12 @@ class SyncLockTests(unittest.TestCase):
             lock.write_text("999999-dead", encoding="utf-8")
             live = "4242-live"
 
+            calls = []
+
             def dead_then_swapped(pid):
+                if calls:
+                    return True  # the new owner is alive
+                calls.append(pid)
                 lock.write_text(live, encoding="utf-8")  # the winner re-created the lock after we read it
                 return False
 
