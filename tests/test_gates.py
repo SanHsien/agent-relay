@@ -87,6 +87,16 @@ class CommandTests(unittest.TestCase):
             self.assertFalse(gates.is_test_file(no), no)
 
 
+class TimeoutSettingTests(unittest.TestCase):
+    def test_bad_timeout_values_fall_back_to_the_default(self):
+        default = gates.DEFAULT_TIMEOUT_MIN * 60
+        for bad in ("abc", 0, -5, True, None, 1.5, [3]):
+            with self.subTest(bad=bad):
+                self.assertEqual(gates.timeout_seconds({"timeout_minutes": bad}), default)
+        self.assertEqual(gates.timeout_seconds({}), default)
+        self.assertEqual(gates.timeout_seconds({"timeout_minutes": 5}), 300)
+
+
 class DispatchGateTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

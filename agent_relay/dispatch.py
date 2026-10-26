@@ -1210,7 +1210,7 @@ def dispatch(env_id: str, agent: str, cfg: dict, sync: bool = True, force: bool 
                 else:
                     time.sleep(min(30, 5 * len(attempts)))  # transient: resume in place after a short wait
             # The gates may take a while too: extend the lease and claim once more before them.
-            gate_window = int(((policy.get("verify") or {}).get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN))) * 180  # base, red, green
+            gate_window = gates.timeout_seconds(policy.get("verify") or {}) * 3  # base, red, green
             write_state(env_id, phase="running", pid=os.getpid(), started=time.time(),
                         deadline=time.time() + gate_window + LEASE_GRACE_S)
             if claim:

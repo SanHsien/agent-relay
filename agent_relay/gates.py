@@ -114,6 +114,14 @@ def verify_command(repo: Path, settings: dict) -> list[str] | None:
     return None
 
 
+def timeout_seconds(settings: dict) -> int:
+    """verify.timeout_minutes in seconds; anything but a positive whole number means the default."""
+    minutes = settings.get("timeout_minutes", DEFAULT_TIMEOUT_MIN)
+    if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes <= 0:
+        minutes = DEFAULT_TIMEOUT_MIN
+    return minutes * 60
+
+
 def _matches(path: str, globs) -> bool:
     from .locks import match_path  # same matcher as check-out claims
 
@@ -505,7 +513,7 @@ def check(repo: Path, worktree: Path, base: str, changed: list[str], run_dir: Pa
     command = verify_command(repo, settings)
     if command is None:
         return GateResult("unverified", notes + ["找不到驗證指令（dispatch.verify.command 或 loop-policy.toml quick_gate）"])
-    timeout_s = int(settings.get("timeout_minutes", DEFAULT_TIMEOUT_MIN)) * 60
+    timeout_s = timeout_seconds(settings)
     logs = []
     if want_tdd or settings.get("tdd"):
         tests = [f for f in changed if is_test_file(f, globs) and (worktree / f).exists()]

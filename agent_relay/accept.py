@@ -173,9 +173,7 @@ def merge_and_verify(repo: Path, head: str, commit: str, message: str, command: 
     task's base since it was sent.
     """
     settings = (cfg.get("accept") or {}).get("verify") or {}
-    timeout = settings.get("timeout_minutes", gates.DEFAULT_TIMEOUT_MIN)
-    timeout_s = int(timeout) * 60 if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout > 0 \
-        else gates.DEFAULT_TIMEOUT_MIN * 60
+    timeout_s = gates.timeout_seconds(settings)
     run_dir = config.home() / "accepts" / reply_id
     holder = Path(tempfile.mkdtemp(prefix="relay-accept-"))
     scratch = holder / "wt"
