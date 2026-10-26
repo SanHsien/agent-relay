@@ -52,6 +52,14 @@ class EnvelopeTests(unittest.TestCase):
         with self.assertRaises(envelope.EnvelopeError):
             envelope.validate(env)
 
+    def test_rejects_non_string_names_and_ids(self):
+        """5 looks like a legal name once str()-ed; it must be refused, not crash later in Path()."""
+        for key in ("from", "to", "id", "thread", "reply_to"):
+            env = envelope.build(sender="a", to="b", subject="s", body="x")
+            env[key] = 5
+            with self.subTest(key=key), self.assertRaises(envelope.EnvelopeError):
+                envelope.validate(env)
+
     def test_rejects_unknown_schema(self):
         env = envelope.build(sender="a", to="b", subject="x", body="")
         env["schema"] = "other@9"

@@ -96,10 +96,10 @@ def validate(env: dict) -> None:
     if env["schema"] != SCHEMA:
         raise EnvelopeError(f"unsupported schema: {env['schema']!r}")
     for key in ("from", "to"):
-        if not safe_name(env[key]):
+        if not isinstance(env[key], str) or not safe_name(env[key]):
             raise EnvelopeError(f"bad agent name in {key!r}: {env[key]!r}")
-    for key in ("id", "thread", "reply_to"):
-        if key in env and not safe_name(env[key], ID_RE):
+    for key in ("id", "thread", "reply_to"):  # (id is required above, so it is always checked)
+        if key in env and (not isinstance(env[key], str) or not safe_name(env[key], ID_RE)):
             raise EnvelopeError(f"{key} must be a plain file name: {env[key]!r}")
     if not CREATED_RE.fullmatch(str(env["created_at"])):
         raise EnvelopeError(f"created_at is not ISO 8601: {env['created_at']!r}")
