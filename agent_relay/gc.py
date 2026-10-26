@@ -41,6 +41,8 @@ def _finished_runs(cutoff: float) -> dict[str, dict]:
             state = json.loads(state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if not isinstance(state, dict):
+            continue
         finished = state.get("finished")
         if state.get("phase") == "replied" and isinstance(finished, (int, float)) and finished < cutoff:
             out[state_file.parent.name] = state
@@ -130,9 +132,11 @@ def _all_states() -> dict[str, dict]:
     out = {}
     for state_file in runs.glob("*/state.json") if runs.is_dir() else []:
         try:
-            out[state_file.parent.name] = json.loads(state_file.read_text(encoding="utf-8"))
+            state = json.loads(state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if isinstance(state, dict):
+            out[state_file.parent.name] = state
     return out
 
 

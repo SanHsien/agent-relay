@@ -97,12 +97,17 @@ def to_event(env: dict, pubkey: str = PLACEHOLDER_PUBKEY, to_pubkey: str | None 
 
 
 def verify_id(event: dict) -> bool:
-    return bool(ID_HEX_RE.fullmatch(str(event.get("id", "")))) and event["id"] == compute_id(event)
+    if not isinstance(event, dict) or not ID_HEX_RE.fullmatch(str(event.get("id", ""))):
+        return False
+    try:
+        return event["id"] == compute_id(event)
+    except (KeyError, TypeError, NostrPocError):  # missing or mistyped fields: not a valid event
+        return False
 
 
 def _tag(event: dict, name: str) -> str | None:
     for tag in event["tags"]:
-        if tag and tag[0] == name:
+        if isinstance(tag, list) and len(tag) >= 2 and tag[0] == name:
             return tag[1]
     return None
 

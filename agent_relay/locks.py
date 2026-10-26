@@ -183,6 +183,9 @@ def active_claims(store: Path, key: str, now: float | None = None) -> list[dict]
         except (OSError, ValueError, TypeError):
             continue  # one broken claim (perhaps synced from another machine) must not lock the whole repo
         if live:
+            # Claims come from other machines: fill what the readers below rely on.
+            claim.setdefault("holder", "?")
+            claim.setdefault("expires_at", _iso(float(claim["expires"])))
             out.append(claim)
     return sorted(out, key=lambda c: c.get("created", 0) if isinstance(c.get("created"), (int, float)) else 0)
 

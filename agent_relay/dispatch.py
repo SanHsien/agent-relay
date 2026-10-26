@@ -32,6 +32,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -618,11 +619,16 @@ def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: 
                                 stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
                                 creationflags=CREATE_NO_WINDOW, env=env)
         if stdin_text is not None:
-            try:
-                proc.stdin.write(stdin_text.encode("utf-8"))
-                proc.stdin.close()
-            except OSError:
-                pass  # the worker exited early; its exit code says why
+            def feed() -> None:
+                try:
+                    proc.stdin.write(stdin_text.encode("utf-8"))
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass  # the worker exited early (or was killed); its exit code says why
+
+            # A thread: a worker that does not read stdin would block a large write for ever,
+            # and the timeout below must still fire. Killing the worker closes the pipe.
+            threading.Thread(target=feed, daemon=True).start()
         try:
             code = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
@@ -812,9 +818,10 @@ def write_state(env_id: str, **fields) -> None:
 
 def read_state(env_id: str) -> dict | None:
     try:
-        return json.loads(_state_path(env_id).read_text(encoding="utf-8"))
+        state = json.loads(_state_path(env_id).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return state if isinstance(state, dict) else None
 
 
 # ---------------------------------------------------------------- limits (SPEC section 15)
@@ -1348,7 +1355,11 @@ def _never_started(env: dict, cfg: dict, rung: set[str], now: float) -> bool:
         return False
     if not any(bell.get("type") == "dispatch" for bell in cfg.get("doorbells", [])):
         return False  # without a dispatch doorbell someone runs it by hand; leave it
-    created = calendar.timegm(time.strptime(env["created_at"][:19], "%Y-%m-%dT%H:%M:%S"))
+    try:  # honour an offset ("-08:00"): the sender's clock reading is not UTC
+        stamp = datetime.fromisoformat(str(env["created_at"]).replace("Z", "+00:00"))
+        created = stamp.timestamp() if stamp.tzinfo else calendar.timegm(stamp.timetuple())
+    except ValueError:
+        created = calendar.timegm(time.strptime(env["created_at"][:19], "%Y-%m-%dT%H:%M:%S"))
     return now - created > LEASE_GRACE_S * 3
 
 

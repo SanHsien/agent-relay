@@ -51,7 +51,7 @@ def local_leases(now: float | None = None) -> list[dict]:
             state = json.loads(state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if state.get("phase") not in ("running", "queued"):
+        if not isinstance(state, dict) or state.get("phase") not in ("running", "queued"):
             continue
         deadline = state.get("deadline")
         out.append({"id": state_file.parent.name, "phase": state["phase"], "pid": state.get("pid"),
@@ -75,7 +75,7 @@ def heartbeat(cfg: dict, agent: str, now: float | None = None) -> bool:
         old = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         old = None
-    if old is not None:
+    if isinstance(old, dict):
         last = _parse(old.get("at", ""))
         unchanged = (old.get("running"), old.get("queued")) == (data["running"], data["queued"])
         if last is not None and now - last < interval * 60 and unchanged:
@@ -101,6 +101,8 @@ def overview(cfg: dict, stale_minutes: float = DEFAULT_STALE_MIN, now: float | N
         try:
             data = json.loads(beat.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
             continue
         last = _parse(data.get("at", ""))
         age = None if last is None else round((now - last) / 60, 1)
