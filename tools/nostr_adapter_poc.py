@@ -22,9 +22,11 @@ if str(ROOT) not in sys.path:
 
 from agent_relay import envelope  # noqa: E402
 
-# Placeholder kind numbers inside the NIP-01 regular range 1000-9999.
-# Collision with registered NIPs is NOT verified (evaluation doc Section 5).
-KIND_TO_INT = {"task": 9001, "result": 9002, "reply": 9003, "note": 9004}
+# Kind numbers inside the NIP-01 regular range (1000 <= n < 10000, stored by relays).
+# 9000-9030 is registered to NIP-29 group control events, so 4001-4004 are used:
+# checked against the NIPs README "Event Kinds" table on 2026-10-26, unregistered
+# (see evaluation doc Section 5). Not a reservation: re-check before real use.
+KIND_TO_INT = {"task": 4001, "result": 4002, "reply": 4003, "note": 4004}
 INT_TO_KIND = {v: k for k, v in KIND_TO_INT.items()}
 
 PUBKEY_RE = re.compile(r"[0-9a-f]{64}")

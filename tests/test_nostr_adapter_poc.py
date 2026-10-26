@@ -30,11 +30,11 @@ poc = _load()
 
 # Hand-written NIP-01 commitment strings, hashed here with hashlib directly
 # (not through the PoC), so the PoC is checked against an independent oracle.
-VECTOR_PLAIN = '[0,"' + "a" * 64 + '",1792977825,9001,[],""]'
-VECTOR_PLAIN_ID = "7d54e917753a9824b8742c44a93136468ec118f8086e6d039acc86cbb29d561a"
+VECTOR_PLAIN = '[0,"' + "a" * 64 + '",1792977825,4001,[],""]'
+VECTOR_PLAIN_ID = "1dab6b759a32f47765a0436edfd748b79c64feda22bc6d2f67d99ca281f2958a"
 # subject = hi "x"<LF>, content = hello<U+0001><U+4F60>; NIP-01 escapes only \" \\ \n \r \t \b \f
-VECTOR_ESC = ('[0,"' + "a" * 64 + '",1792977825,9001,[["subject","hi \\"x\\"\\n"]],"hello\x01\u4f60"]')
-VECTOR_ESC_ID = "c515faad484adccb24762d738cd20c9144b69c0311b1d91e8a9c29cd719ef1df"
+VECTOR_ESC = ('[0,"' + "a" * 64 + '",1792977825,4001,[["subject","hi \\"x\\"\\n"]],"hello\x01\u4f60"]')
+VECTOR_ESC_ID = "444d1c7ed13adef704ca3b48b5e4f227baaddcf06016b06049213c7b99f5da6e"
 
 
 def sample(**extra) -> dict:
@@ -54,12 +54,12 @@ class VectorTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(VECTOR_ESC.encode()).hexdigest(), VECTOR_ESC_ID)
 
     def test_plain_serialization_and_id(self):
-        event = {"pubkey": "a" * 64, "created_at": 1792977825, "kind": 9001, "tags": [], "content": ""}
+        event = {"pubkey": "a" * 64, "created_at": 1792977825, "kind": 4001, "tags": [], "content": ""}
         self.assertEqual(poc.serialize(event), VECTOR_PLAIN)
         self.assertEqual(poc.compute_id(event), VECTOR_PLAIN_ID)
 
     def test_escaping_follows_nip01_not_python_json(self):
-        event = {"pubkey": "a" * 64, "created_at": 1792977825, "kind": 9001,
+        event = {"pubkey": "a" * 64, "created_at": 1792977825, "kind": 4001,
                  "tags": [["subject", 'hi "x"\n']], "content": "hello\x01\u4f60"}
         self.assertEqual(poc.serialize(event), VECTOR_ESC)
         self.assertEqual(poc.compute_id(event), VECTOR_ESC_ID)
@@ -86,7 +86,7 @@ class RoundTripTests(unittest.TestCase):
 
     def test_tags_and_kind_mapping(self):
         event = poc.to_event(sample())
-        self.assertEqual(event["kind"], 9001)
+        self.assertEqual(event["kind"], 4001)
         self.assertIn(["relay-id", "20261026T012345000Z-a1b2c3"], event["tags"])
         self.assertEqual(event["created_at"], 1792977825)
 

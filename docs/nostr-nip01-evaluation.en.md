@@ -19,7 +19,7 @@ NIP-01 essentials (verified 2026-10-26): an event has `id`, `pubkey`, `created_a
 | `id` (`YYYYMMDDTHHMMSSmmmZ-6hex`, the filename) | `id` (64-char hex, content hash) | **No, different semantics** | A NIP-01 `id` is derived from content and cannot be chosen. Put the envelope `id` in tag `["relay-id", <id>]`; `reply_to`/`thread` also need custom `relay-*` tags because the `e` tag expects a 64-char event id |
 | `from` / `to` (mailbox names) | `pubkey` / `["p", <pubkey>]` | **No** | Mailbox names are arbitrary strings; Nostr uses public keys. A local mailbox-to-secp256k1-pubkey table is needed, kept local like `allowed_signers` |
 | `created_at` (ISO 8601 UTC, seconds) | `created_at` (Unix seconds) | Yes | Lossless; example `2026-10-26T01:23:45Z` -> `1792977825` |
-| `kind` (`task`/`result`/`reply`/`note`) | `kind` (integer) | Needs a custom choice | Four strings must map to integers. Pick unregistered numbers within the regular range 1000-9999; **check the NIPs registry for collisions before implementing (not verified)**; `note` could use the ephemeral range 20000-29999 |
+| `kind` (`task`/`result`/`reply`/`note`) | `kind` (integer) | Needs a custom choice | Four strings must map to integers. Pick unregistered numbers within the regular range 1000-9999; **check the NIPs registry for collisions before implementing (verified, see Section 5)**; `note` could use the ephemeral range 20000-29999 |
 | `subject` | tag `["subject", ...]` | Yes (custom tag) | NIP-01 only requires tags to be string arrays with free names; whether a standard `subject` tag exists is not verified |
 | `body` | `content` | Yes | Plain string; JSON serialization handles escaping |
 | `priority`, `host`, `project`, `refs`, `dispatch` | tags or `content` | Yes (custom) | Only `to` and `kind` need relay-side filtering; keep the rest in the embedded envelope JSON |
@@ -39,7 +39,7 @@ Nostr event
   sig        = bridge Schnorr signature over the event id
 ```
 
-Computed check (stdlib `hashlib`; sample envelope, kind 9000 is a placeholder, pubkeys are placeholders): the serialization is 614 bytes and the event `id` is `ee6b639e794c061d2fe7fdcdbe4b4806d1a12027ea2b7d096867b6020414e9c8`. The SHA-256 of the same envelope's canonical JSON is `95bbd2902b21cdd7a9129f5bd977e8d81519424726af20b5c0cba0f7b01fea17`. The two differ by design, so the envelope `id` cannot be reused as the event `id`. (The `sig` itself was not computed: the local Python has no secp256k1 package; see Section 3.)
+Computed check (stdlib `hashlib`; sample envelope, kind 9000 is only an illustrative value for computing the `id`; it collides with NIP-29 and must not be used, pubkeys are placeholders): the serialization is 614 bytes and the event `id` is `ee6b639e794c061d2fe7fdcdbe4b4806d1a12027ea2b7d096867b6020414e9c8`. The SHA-256 of the same envelope's canonical JSON is `95bbd2902b21cdd7a9129f5bd977e8d81519424726af20b5c0cba0f7b01fea17`. The two differ by design, so the envelope `id` cannot be reused as the event `id`. (The `sig` itself was not computed: the local Python has no secp256k1 package; see Section 3.)
 
 ## 3. Signature Differences
 
@@ -71,7 +71,7 @@ When it becomes worthwhile: a Nostr relay is already running (for example the Bu
 
 ## 5. Unverified Items and Limits
 
-- Whether a chosen custom `kind` number collides with a registered one: not verified.
+- Custom `kind` collision check (2026-10-26; sources: [NIPs README "Event Kinds" table](https://github.com/nostr-protocol/nips/blob/master/README.md), [NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md)): the original placeholders 9001-9004 **collide**: they fall inside NIP-29's registered `9000`-`9030` (Group Control Events). Replaced by `4001`-`4004`: the registry has no entry between `2022` (Coinjoin Pool) and `4550` (Community Post Approval). NIP-01 defines `1000 <= n < 10000` as regular events, which relays are expected to store without overwriting; this fits mail where every message must be kept (replaceable keeps only the latest, ephemeral is not stored, addressable keeps only the latest version). Unregistered is not reserved: re-check before real use.
 - NIP-10 (thread markers on `e` tags) and NIP-14 (`subject` tag): not read this time; the table uses custom tags and does not depend on them.
 - Schnorr signing and verification, and a real relay connection: not tested, for the reasons in Sections 4 and 6.
 - The event `id` computation used only the Python standard library (`hashlib`, `json`) and can be recomputed by anyone with the serialization rule in Section 1.
@@ -91,22 +91,22 @@ python tools/nostr_adapter_poc.py from-event ev.json
 python -m unittest tests.test_nostr_adapter_poc -v
 ```
 
-Measured output (2026-10-26, Windows 11, Python 3.14, built-in sample envelope; `kind` 9001-9004 and the all-zero pubkey are placeholders):
+Measured output (2026-10-26, Windows 11, Python 3.14, built-in sample envelope; `kind` 4001-4004 (verified unregistered, see Section 5); the all-zero pubkey is a placeholder):
 
 ```text
 python tools/nostr_adapter_poc.py demo
-serialization: [0,"0000000000000000000000000000000000000000000000000000000000000000",1792977825,9001,[["relay-id","20261026T012345000Z-...
-event id     : a77af769de8bdd0648e8205b70966137568041a3cf907cb2fa7bd95e4549e3b0
+serialization: [0,"0000000000000000000000000000000000000000000000000000000000000000",1792977825,4001,[["relay-id","20261026T012345000Z-...
+event id     : d5f8cb601648f70ffb930143a8a0b99f0221d65e8557cf5ca91f6579772d24e5
 id verifies  : True
 round trip   : True
 sig          : absent (unsigned; no secp256k1 in stdlib)
 
 python tools/nostr_adapter_poc.py verify ev.json            # exit 0
-id OK: claimed=a77af769...e3b0 computed=a77af769...e3b0 (unsigned: sig not checked)
+id OK: claimed=d5f8cb60...24e5 computed=d5f8cb60...24e5 (unsigned: sig not checked)
 
 (tamper: change "Hello" to "HELLO" inside content of ev.json, save as ev2.json)
 python tools/nostr_adapter_poc.py verify ev2.json           # exit 1
-id MISMATCH: claimed=a77af769...e3b0 computed=9eacc4c6696da52e94ee755bfbbbb6f6913db291d6520b1d0fb745d00b7e713f (unsigned: sig not checked)
+id MISMATCH: claimed=d5f8cb60...24e5 computed=6f9b09512f83a2aa7ed327a115d1ca0f82c5e913a0829a52dece8ad20b66ec88 (unsigned: sig not checked)
 python tools/nostr_adapter_poc.py from-event ev2.json       # exit 1
 error: event id does not match NIP-01 recomputation (content altered?)
 ```
@@ -118,5 +118,5 @@ Limits:
 - **No `sig`**: the standard library has no secp256k1 BIP-340 Schnorr, so the event carries no `sig` and any relay would reject it. The `id` proves content integrity, not origin.
 - **No real relay connection**: the standard library has no WebSocket client or server; hand-rolling RFC 6455 plus a home-made "relay" would only test itself and prove nothing about interop with a real relay, and this work installs no packages and runs no unvetted relay software. Interop (`EVENT`/`OK`/`REQ`) still awaits the minimal acceptance in Section 4.
 - The Section 2 example `id` (`ee6b639e...`) comes from a different sample envelope than the prototype's built-in one, so the two ids differ; both can be recomputed with the same serialization rule.
-- `kind` 9001-9004 are placeholders; collision with registered NIPs is still not verified.
+- `kind` 4001-4004 were verified unregistered on 2026-10-26 (Section 5); the earlier placeholders 9001-9004 collided with NIP-29 and are retired.
 - Only envelope-to-event mapping and its inverse; no `ack`/state events and no mailbox-to-pubkey table.

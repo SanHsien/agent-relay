@@ -19,7 +19,7 @@ NIP-01 的要點（2026-10-26 查證）：事件欄位為 `id`、`pubkey`、`cre
 | `id`（`YYYYMMDDTHHMMSSmmmZ-6hex`，檔名） | `id`（64 字元 hex，內容雜湊） | **否，語意不同** | NIP-01 的 `id` 由內容算出，無法指定。信件 `id` 改放 tag `["relay-id", <id>]`；回信的 `reply_to`／`thread` 也得用 `relay-*` 自訂 tag，不能直接套 `e` tag（`e` 要 64 字元事件 id） |
 | `from` / `to`（信箱名） | `pubkey` / `["p", <pubkey>]` | **否** | 信箱名是任意字串，Nostr 是公鑰。需要一份本機「信箱名 ↔ secp256k1 公鑰」對照表，與現有 `allowed_signers` 一樣只存本機 |
 | `created_at`（ISO 8601 UTC，秒） | `created_at`（Unix 秒） | 是 | 無損轉換；範例 `2026-10-26T01:23:45Z` → `1792977825` |
-| `kind`（`task`/`result`/`reply`/`note`） | `kind`（整數） | 需自訂 | 四種字串要對到整數。建議用一般事件區段 1000～9999 內自選未登記的數字，**實作前須查 NIPs 登記表避免撞號（未查證）**；`note` 也可考慮短暫事件 20000～29999 |
+| `kind`（`task`/`result`/`reply`/`note`） | `kind`（整數） | 需自訂 | 四種字串要對到整數。建議用一般事件區段 1000～9999 內自選未登記的數字，**實作前須查 NIPs 登記表避免撞號（已查證，見第 5 節）**；`note` 也可考慮短暫事件 20000～29999 |
 | `subject` | tag `["subject", ...]` | 是（自訂 tag） | NIP-01 只規定 tag 為字串陣列，名稱自訂；是否有標準 `subject` tag 未查證 |
 | `body` | `content` | 是 | 純字串；NIP-01 對 `content` 的跳脫規則由 JSON 序列化處理 |
 | `priority`、`host`、`project`、`refs`、`dispatch` | tags 或 `content` | 是（自訂） | 只有 `to`、`kind` 需要被 relay 過濾，其餘留在內嵌信件 JSON 即可 |
@@ -39,7 +39,7 @@ Nostr 事件
   sig        = 橋接器對事件 id 的 Schnorr 簽章
 ```
 
-實算驗證（stdlib `hashlib`，範例信件、kind 9000 為示意值，公鑰為佔位）：序列化 614 位元組，事件 `id` = `ee6b639e794c061d2fe7fdcdbe4b4806d1a12027ea2b7d096867b6020414e9c8`。同一份信件的 canonical JSON SHA-256 是 `95bbd2902b21cdd7a9129f5bd977e8d81519424726af20b5c0cba0f7b01fea17`，兩者本來就不同，所以信件 `id` 不能沿用為事件 `id`。（`sig` 本身未實算：本機 Python 沒有 secp256k1 套件，見第 3 節。）
+實算驗證（stdlib `hashlib`，範例信件、kind 9000 僅為算 `id` 的示意值，該數字與 NIP-29 撞號，不可實用，公鑰為佔位）：序列化 614 位元組，事件 `id` = `ee6b639e794c061d2fe7fdcdbe4b4806d1a12027ea2b7d096867b6020414e9c8`。同一份信件的 canonical JSON SHA-256 是 `95bbd2902b21cdd7a9129f5bd977e8d81519424726af20b5c0cba0f7b01fea17`，兩者本來就不同，所以信件 `id` 不能沿用為事件 `id`。（`sig` 本身未實算：本機 Python 沒有 secp256k1 套件，見第 3 節。）
 
 ## 3. 簽章差異
 
@@ -71,7 +71,7 @@ Nostr 事件
 
 ## 5. 未查證與限制
 
-- 自訂 `kind` 數字是否與 NIPs 已登記數字衝突：未查證。
+- 自訂 `kind` 撞號查證（2026-10-26，出處：[NIPs README「Event Kinds」表](https://github.com/nostr-protocol/nips/blob/master/README.md)、[NIP-01](https://github.com/nostr-protocol/nips/blob/master/01.md)）：原佔位值 9001～9004 **撞號**，落在 NIP-29 登記的 `9000`-`9030`（Group Control Events）。已改用 `4001`～`4004`：登記表在 `2022`（Coinjoin Pool）與 `4550`（Community Post Approval）之間沒有任何登記。NIP-01 定義 `1000 <= n < 10000` 為一般（regular）事件，relay 預期儲存、不覆蓋，符合信件「每封都要保留」的語意（replaceable 只留最新一封、ephemeral 不儲存、addressable 只留最新版，都不合）。未登記不等於保留：正式使用前仍須重查。
 - NIP-10（`e` tag 的 thread 標記）、NIP-14（`subject` tag）：本次未讀，上表只用自訂 tag，不依賴它們。
 - Schnorr 簽署與驗證、relay 實連：未實測，原因見第 4、6 節。
 - 事件 `id` 實算只用 Python 標準庫 `hashlib`／`json`，可由任何人用第 1 節的序列化規則重算。
@@ -91,22 +91,22 @@ python tools/nostr_adapter_poc.py from-event ev.json
 python -m unittest tests.test_nostr_adapter_poc -v
 ```
 
-實測輸出（2026-10-26，Windows 11，Python 3.14，內建範例信件；`kind` 9001～9004 與全零公鑰都是佔位值）：
+實測輸出（2026-10-26，Windows 11，Python 3.14，內建範例信件；`kind` 4001～4004（已查證未登記，見第 5 節）與全零公鑰；公鑰為佔位值）：
 
 ```text
 python tools/nostr_adapter_poc.py demo
-serialization: [0,"0000000000000000000000000000000000000000000000000000000000000000",1792977825,9001,[["relay-id","20261026T012345000Z-...
-event id     : a77af769de8bdd0648e8205b70966137568041a3cf907cb2fa7bd95e4549e3b0
+serialization: [0,"0000000000000000000000000000000000000000000000000000000000000000",1792977825,4001,[["relay-id","20261026T012345000Z-...
+event id     : d5f8cb601648f70ffb930143a8a0b99f0221d65e8557cf5ca91f6579772d24e5
 id verifies  : True
 round trip   : True
 sig          : absent (unsigned; no secp256k1 in stdlib)
 
 python tools/nostr_adapter_poc.py verify ev.json            # exit 0
-id OK: claimed=a77af769...e3b0 computed=a77af769...e3b0 (unsigned: sig not checked)
+id OK: claimed=d5f8cb60...24e5 computed=d5f8cb60...24e5 (unsigned: sig not checked)
 
 (tamper: change "Hello" to "HELLO" inside content of ev.json, save as ev2.json)
 python tools/nostr_adapter_poc.py verify ev2.json           # exit 1
-id MISMATCH: claimed=a77af769...e3b0 computed=9eacc4c6696da52e94ee755bfbbbb6f6913db291d6520b1d0fb745d00b7e713f (unsigned: sig not checked)
+id MISMATCH: claimed=d5f8cb60...24e5 computed=6f9b09512f83a2aa7ed327a115d1ca0f82c5e913a0829a52dece8ad20b66ec88 (unsigned: sig not checked)
 python tools/nostr_adapter_poc.py from-event ev2.json       # exit 1
 error: event id does not match NIP-01 recomputation (content altered?)
 ```
@@ -118,5 +118,5 @@ error: event id does not match NIP-01 recomputation (content altered?)
 - **沒有 `sig`**：標準庫沒有 secp256k1 BIP-340 Schnorr，事件不含 `sig`，因此任何 relay 都會拒收；`id` 只能證明內容完整，不能證明來源。
 - **未實連 relay**：標準庫沒有 WebSocket 客戶端或伺服器；手刻 RFC 6455 再自寫一個「relay」只會自己測自己，不能證明與真實 relay 互通，而本次也不安裝套件、不執行來源不明的 relay 程式。互通性（`EVENT`／`OK`／`REQ`）仍待第 4 節的最小驗收。
 - 第 2 節範例的 `id`（`ee6b639e...`）來自另一份範例信件，與本原型內建範例的 `id` 不同；兩者都可用同一套序列化規則重算。
-- `kind` 9001～9004 為佔位值，是否與已登記 NIP 衝突仍未查證。
+- `kind` 4001～4004 經 2026-10-26 查證未被登記表使用（見第 5 節）；先前佔位值 9001～9004 與 NIP-29 撞號，已棄用。
 - 只做信件到事件的單向映射與反向還原；不處理 `ack`／狀態事件、信箱名與公鑰對照表。
