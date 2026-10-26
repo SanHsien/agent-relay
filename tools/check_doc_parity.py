@@ -35,6 +35,11 @@ DOC_PAIRS = (
         "docs/templates/escalation-prompt.en.md",
         "docs/templates/escalation-prompt.md",
     ),
+    DocPair(
+        "docs/nostr-nip01-evaluation",
+        "docs/nostr-nip01-evaluation.en.md",
+        "docs/nostr-nip01-evaluation.md",
+    ),
 )
 
 

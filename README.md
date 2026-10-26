@@ -11,6 +11,7 @@
 - 協定規格：[SPEC.md](SPEC.md)
 - 給 Agent 的操作說明：[AGENTS.md](AGENTS.md)
 - Antigravity App 既有會話收信：[sidecar 安裝、簽章與驗收](docs/antigravity-app-mailbox.md)（不同於 `--run agy` 新開唯讀 CLI 工人）
+- Nostr NIP-01 對接評估（欄位映射、簽章差異、結論）：[docs/nostr-nip01-evaluation.md](docs/nostr-nip01-evaluation.md)
 
 ## 快速開始
 

@@ -41,7 +41,7 @@ python -m agent_relay ack <id>
 
 - 只用 Python 標準函式庫，Windows 11 原生優先。
 - 改協定先改 [SPEC.md](SPEC.md) 與 [SPEC.en.md](SPEC.en.md)，再改程式和測試。
-- 公開文件維持繁體中文（無後綴 `.md`）與英文（`.en.md`）雙語同步：`README.md`／`README.en.md`、`SPEC.md`／`SPEC.en.md`、`docs/antigravity-app-mailbox.md`／`docs/antigravity-app-mailbox.en.md`、`docs/templates/escalation-prompt.md`／`docs/templates/escalation-prompt.en.md`。歷史實測與研究紀錄（`docs/evidence/`、`docs/reports/`）維持繁體中文原貌。
+- 公開文件維持繁體中文（無後綴 `.md`）與英文（`.en.md`）雙語同步：`README.md`／`README.en.md`、`SPEC.md`／`SPEC.en.md`、`docs/antigravity-app-mailbox.md`／`docs/antigravity-app-mailbox.en.md`、`docs/templates/escalation-prompt.md`／`docs/templates/escalation-prompt.en.md`、`docs/nostr-nip01-evaluation.md`／`docs/nostr-nip01-evaluation.en.md`。歷史實測與研究紀錄（`docs/evidence/`、`docs/reports/`）維持繁體中文原貌。
 - 提交前執行 `pwsh -NoProfile -File tools/dev_check.ps1`（或 `python -m unittest discover -s tests -v && python tools/check_doc_parity.py && python tools/check_links.py`）全綠才提交。
 - 本 repo 公開：私人 repo 一律寫 `[Private Repo: <別名>]`，不寫真名。
 
@@ -88,6 +88,6 @@ New mailboxes require no pre-registration; sending the first message to a mailbo
 
 - Use only the Python standard library; prioritize native Windows 11 compatibility.
 - When changing the protocol, update [SPEC.md](SPEC.md) and [SPEC.en.md](SPEC.en.md) first, then update the implementation and tests.
-- Keep public documentation synchronized in Traditional Chinese (suffix-less `.md`) and English (`.en.md`): `README.md` / `README.en.md`, `SPEC.md` / `SPEC.en.md`, `docs/antigravity-app-mailbox.md` / `docs/antigravity-app-mailbox.en.md`, and `docs/templates/escalation-prompt.md` / `docs/templates/escalation-prompt.en.md`. Historical evidence and benchmark reports (`docs/evidence/`, `docs/reports/`) remain in Traditional Chinese.
+- Keep public documentation synchronized in Traditional Chinese (suffix-less `.md`) and English (`.en.md`): `README.md` / `README.en.md`, `SPEC.md` / `SPEC.en.md`, `docs/antigravity-app-mailbox.md` / `docs/antigravity-app-mailbox.en.md`, `docs/templates/escalation-prompt.md` / `docs/templates/escalation-prompt.en.md`, and `docs/nostr-nip01-evaluation.md` / `docs/nostr-nip01-evaluation.en.md`. Historical evidence and benchmark reports (`docs/evidence/`, `docs/reports/`) remain in Traditional Chinese.
 - Run `pwsh -NoProfile -File tools/dev_check.ps1` (or `python -m unittest discover -s tests -v && python tools/check_doc_parity.py && python tools/check_links.py`) and ensure all checks pass before committing.
 - Because this repository is public, always refer to private repositories as `[Private Repo: <Alias>]` and never write real private repository names.

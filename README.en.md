@@ -11,6 +11,7 @@ This repository also serves as the **master index** of the "Multi-Agent Dispatch
 - Protocol specification: [SPEC.en.md](SPEC.en.md) ([繁體中文](SPEC.md))
 - Operating guide for agents: [AGENTS.md](AGENTS.md)
 - Receiving mail in an existing Antigravity App conversation: [sidecar setup, signing, and acceptance](docs/antigravity-app-mailbox.en.md) (distinct from `--run agy`, which opens a new read-only CLI worker)
+- Nostr NIP-01 bridging evaluation (field mapping, signature gap, conclusion): [docs/nostr-nip01-evaluation.en.md](docs/nostr-nip01-evaluation.en.md)
 
 ## Quick Start
 
