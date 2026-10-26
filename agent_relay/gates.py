@@ -321,7 +321,8 @@ def evaluate_governance_policy(worktree: Path, changed: list[str], settings: dic
     else:
         for rel in changed:
             norm_rel = rel.replace("\\", "/")
-            if any(fnmatch.fnmatch(norm_rel, pat) or fnmatch.fnmatch(Path(norm_rel).name, pat) for pat in blocked):
+            if any(_matches(norm_rel, [pat]) or fnmatch.fnmatch(norm_rel, pat) or fnmatch.fnmatch(Path(norm_rel).name, pat)
+                   for pat in blocked):  # match_path: `**/x` also covers x at the repo root
                 return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：檔案 {rel} 命中禁止路徑規則"])
         if max_files and len(changed) > max_files:
             return GateResult("policy-violation", [f"治理政策違規（路徑邊界）：變更檔案數 {len(changed)} 超過上限 {max_files}"])

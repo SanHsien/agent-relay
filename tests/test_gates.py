@@ -375,6 +375,16 @@ class GovernanceWithoutAgtTests(unittest.TestCase):
         res = gates.evaluate_governance_policy(self.worktree, ["k.py"], {"governance_fallback": "builtin"})
         self.assertEqual(res.status, "policy-violation")
 
+    def test_builtin_fallback_blocks_root_level_secret_files(self):
+        """`**/x` patterns must also match a file at the repo root (`**` eats zero folders)."""
+        for rel in ("server.pem", "id_rsa", "secrets/token.txt", ".aws/config", ".ssh/id_ed25519"):
+            target = self.worktree / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x\n", encoding="utf-8")
+            with self.subTest(rel=rel), mock.patch.object(gates, "load_governance_toolkit", return_value=False):
+                res = gates.evaluate_governance_policy(self.worktree, [rel], {"governance_fallback": "builtin"})
+                self.assertEqual(res.status, "policy-violation")
+
     def test_unknown_fallback_value_does_not_degrade(self):
         res = gates.evaluate_governance_policy(self.worktree, ["clean.py"], {"governance_fallback": "yes"})
         self.assertEqual(res.status, "unverified")
