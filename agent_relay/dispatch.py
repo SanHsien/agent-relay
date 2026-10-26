@@ -622,9 +622,13 @@ def run(argv: list[str], cwd: Path, log_file: Path, timeout_s: int, stdin_text: 
             def feed() -> None:
                 try:
                     proc.stdin.write(stdin_text.encode("utf-8"))
-                    proc.stdin.close()
                 except (OSError, ValueError):
                     pass  # the worker exited early (or was killed); its exit code says why
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except (OSError, ValueError):
+                        pass
 
             # A thread: a worker that does not read stdin would block a large write for ever,
             # and the timeout below must still fire. Killing the worker closes the pipe.
