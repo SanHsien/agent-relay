@@ -91,3 +91,7 @@ New mailboxes require no pre-registration; sending the first message to a mailbo
 - Keep public documentation synchronized in Traditional Chinese (suffix-less `.md`) and English (`.en.md`): `README.md` / `README.en.md`, `SPEC.md` / `SPEC.en.md`, `docs/antigravity-app-mailbox.md` / `docs/antigravity-app-mailbox.en.md`, `docs/templates/escalation-prompt.md` / `docs/templates/escalation-prompt.en.md`, and `docs/nostr-nip01-evaluation.md` / `docs/nostr-nip01-evaluation.en.md`. Historical evidence and benchmark reports (`docs/evidence/`, `docs/reports/`) remain in Traditional Chinese.
 - Run `pwsh -NoProfile -File tools/dev_check.ps1` (or `python -m unittest discover -s tests -v && python tools/check_doc_parity.py && python tools/check_links.py`) and ensure all checks pass before committing.
 - Because this repository is public, always refer to private repositories as `[Private Repo: <Alias>]` and never write real private repository names.
+
+## 路線圖
+
+- `ROADMAP.md` 是本 repo 後續工作的單一真相源。完成或新增工作時，在同一個 commit 更新它：做完的列刪掉、新工作加進去。不要在其他文件另列待辦。
