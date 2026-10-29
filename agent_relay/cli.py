@@ -77,6 +77,8 @@ def _dispatch_spec(args: argparse.Namespace) -> dict | None:
         return None
     if not args.repo:
         raise SystemExit("--run needs --repo (receiver-side path or asr:<session>)")
+    if args.run == "agy":
+        raise SystemExit(dispatcher.AGY_POLICY_REASON)
     spec = {"runtime": args.run, "repo": args.repo, "mode": args.mode, "timeout_minutes": args.timeout}
     if args.path:
         spec["paths"] = args.path

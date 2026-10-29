@@ -44,11 +44,11 @@ _NOISE = re.compile(r"`[^`]*`|[A-Za-z0-9_.~-]*[/\\][A-Za-z0-9_./\\~-]*|[A-Za-z0-
 # (runtime, model, effort) per complexity, best first. Models are the runtime's own ids.
 ROUTES = {
     "high": [("claude", "opus", None), ("codex", None, "high"), ("claude", "sonnet", None)],
-    "medium": [("claude", "sonnet", None), ("codex", None, "medium"), ("agy", None, None)],
-    "low": [("agy", None, None), ("claude", "haiku", None), ("codex", None, "low")],
+    "medium": [("claude", "sonnet", None), ("codex", None, "medium")],
+    "low": [("claude", "haiku", None), ("codex", None, "low")],
 }
-PLAN_OK = {"claude", "codex", "agy"}
-BUILD_OK = {"claude", "codex"}  # agent-relay runs agy read-only (plan + sandbox)
+PLAN_OK = {"claude", "codex"}
+BUILD_OK = {"claude", "codex"}
 
 
 @dataclass

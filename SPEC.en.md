@@ -120,13 +120,13 @@ A `kind=task` message may carry a `dispatch` object instructing the receiver to 
 Commander send --run claude --repo <receiver-repo>
    └─▶ Receiver watch (scheduled) ── dispatch doorbell ──▶ New Windows Terminal tab: relay dispatch <id>
                                                             ├─ git worktree: <repo>/.relay-worktrees/<id>, branch relay/<id>
-                                                            ├─ headless claude / codex / agy (kills entire process tree on timeout)
+                                                            ├─ headless claude / codex / hermes (kills entire process tree on timeout)
                                                             └─ send kind=result (reply_to, same thread) + ack original message
 ```
 
 | Field | Required | Description |
 | --- | --- | --- |
-| `runtime` | Yes | `claude`, `claude-3p`, `codex`, `agy`, or `hermes` |
+| `runtime` | Yes | `claude`, `claude-3p`, `codex`, `hermes` (`agy` disabled by policy) |
 | `repo` | Yes | Git repository path on the receiver machine, or `asr:<session-name>` |
 | `mode` | No | `build` (default: worker edits files inside the worktree and relay commits afterward) or `plan` (read-only) |
 | `model`, `effort` | No | Model ID and reasoning effort passed to the runtime. `model` only allows `[A-Za-z0-9._:/-]` and cannot start with `-`; `effort` must be `low` / `medium` / `high` / `xhigh` |
@@ -147,7 +147,7 @@ Commander send --run claude --repo <receiver-repo>
 
 ```json
 "dispatch": {
-  "runtimes": ["claude", "agy"],
+  "runtimes": ["claude", "codex"],
   "repo_roots": ["C:/GitHub"],
   "senders": ["commander"],
   "cortex_path": "C:/GitHub/agent-cortex",
@@ -167,7 +167,7 @@ Commander send --run claude --repo <receiver-repo>
 - A receiver can opt in to `claude_allowed_tools` to allow specific commands for a `claude` worker (e.g., `["Bash(python -m unittest *)"]`), **which is equivalent to allowing messages to execute unsandboxed code on your machine**—enable only when every trusted sender is fully trusted.
 - Verification responsibility ultimately rests with the commander: the worker's report states which verification command to run, and the commander runs it before merging.
 - Workers only modify the `relay/<id>` branch inside the worktree—**they do not push or touch the main working tree**. The commander decides whether to merge after inspecting the result.
-- Command lines are assembled by the [agent-cortex](https://github.com/SanHsien/agent-cortex) launcher (when `cortex_path` is set or importable), inheriting its hardened permission modes: `claude` uses `acceptEdits` (`plan` in plan mode), `codex` uses `workspace-write` sandbox (`read-only` in plan mode), and `agy` always uses `plan + sandbox`. If `agent-cortex` is unavailable, an equally conservative built-in builder is used. **Never** uses `bypassPermissions` or `--dangerously-*` flags.
+- Command lines are assembled by the [agent-cortex](https://github.com/SanHsien/agent-cortex) launcher (when `cortex_path` is set or importable), inheriting its hardened permission modes: `claude` uses `acceptEdits` (`plan` in plan mode), `codex` uses `workspace-write` sandbox (`read-only` in plan mode); the `agy` worker is disabled by policy. If `agent-cortex` is unavailable, an equally conservative built-in builder is used. **Never** uses `bypassPermissions` or `--dangerously-*` flags.
 - Reply body contents: status and exit code, runtime, worktree and branch, elapsed time, worker final report, commit list, and `diff --stat`. Common token patterns (`sk-`, `ghp_`, `AKIA`, `Bearer`, etc.) are redacted to `[REDACTED]` before entering git history.
 - **Every dispatch is guaranteed to send one reply and ack**: `ok`, `failed`, `timeout`, `refused`, `error` (unexpected exception), or `interrupted`.
 - **Crash recovery**: at launch, relay writes `~/.agent-relay/runs/<id>/state.json` (with deadline = timeout + 10 minutes). If the terminal tab is closed, crashes, or the machine reboots, the message stays in `cur/`; on the next `watch` cycle after the deadline passes without a reply, relay sends a `status: interrupted` reply, acks the message, and syncs immediately. Messages whose doorbell rang but never started (`state.json` missing after 30 minutes) are similarly recovered when the dispatch doorbell is enabled. An error while recovering one message is logged and skipped so it never halts `watch`.
@@ -201,6 +201,7 @@ Commander send --run claude --repo <receiver-repo>
   - Because Hermes has no shell, like `claude` workers it cannot run tests itself; verification is handled by the verification gate.
 - **Pinning the codex sandbox to the worktree**: a user's `~/.codex/config.toml` might widen `workspace-write` via `sandbox_workspace_write.writable_roots` (or `%TEMP%`), which in testing allowed a worker to write into the main repo's `.git/hooks`. Relay always passes `-c sandbox_workspace_write.writable_roots=[]`, `exclude_tmpdir_env_var=true`, and `exclude_slash_tmp=true`. The exact command line (excluding the prompt) for each attempt is saved to `runs/<id>/argv.json` (with previous attempts kept as `argv.N.json`) and echoed in the reply. Also sets `network_access=false`. Prerequisite: file-write isolation on Windows relies on Codex's Windows sandbox, tested with `[windows] sandbox = "elevated"` in `~/.codex/config.toml`; on any new receiver machine, verify with a negative test task first to confirm out-of-tree writes are blocked.
 - Note when running `codex` through an OpenCodex proxy: invoking `codex.exe` directly bypasses `ocx.exe ensure` inside the `codex.CMD` wrapper. If the proxy is not already running, the worker will fail (`failed`), so ensure the proxy daemon is active.
+- **`agy` Worker Disabled by Policy**: Per maintainer policy dated 2026-10-27, third-party agents must not use Antigravity personal subscriptions via `agy -p`. If a task specifies `--run agy` or the receiver configures `dispatch.default` as `agy`, relay strictly refuses the run (replying with `status: refused` citing the policy). Dispatching to Antigravity is done via `python -m agent_relay send --to antigravity --kind task --subject <subject> --project <repo> --ref antigravity-session:new` instead (where the sidecar uses `agentapi` to open a new conversation in Desktop App running under its own login; see Section 20 and [docs/antigravity-app-mailbox.en.md](docs/antigravity-app-mailbox.en.md)).
 
 **Doorbell**: add `{"type": "dispatch"}` to `doorbells`. It opens a new Windows Terminal tab running `relay dispatch <id>` (using console `python.exe` and passing relay `--home` and `--store` as explicit arguments rather than relying on environment variables) so you can watch progress live; if `wt.exe` is unavailable or `"window": false` is set, it spawns a detached background process instead. Dispatch runs outside the scheduled task process because scheduled runs have a 10-minute ceiling.
 
@@ -280,13 +281,13 @@ Quota ── claude: ~/.claude/agentdeck-status.json (written by agentdeck statu
    ▼
 Routing table (aligned with agent-advisor)            Quota ceiling: skip if 5h ≥ 90% or weekly ≥ 95%
   high   claude/opus → codex(effort high) → claude/sonnet
-  medium claude/sonnet → codex(effort medium) → agy
-  low    agy → claude/haiku → codex(effort low)
-  build mode never picks agy (agy is read-only in relay); only picks from dispatch.runtimes
+  medium claude/sonnet → codex(effort medium)
+  low    claude/haiku → codex(effort low)
+  only picks from dispatch.runtimes
 ```
 
 - `auto` cannot be combined with explicit `model` or `effort` (those are runtime-specific IDs chosen together by the receiver).
-- Sender, repository, and path-scope policy checks run **before** quota lookup: unauthorized senders receive `refused` without exposing local quota state. If `dispatch.runtimes` contains no runtime capable of the requested mode (e.g., `build` mode when only `agy` is allowed), relay also replies `refused`.
+- Sender, repository, and path-scope policy checks run **before** quota lookup: unauthorized senders receive `refused` without exposing local quota state. If `dispatch.runtimes` contains no runtime capable of the requested mode (e.g., a build task when `dispatch.runtimes` lists neither `claude` nor `codex`), relay also replies `refused`.
 - If every candidate runtime is over the quota threshold → relay does not execute and replies `status: deferred` with the earliest reset timestamp. Missing or malformed quota output is treated as "unknown (available)" and noted in the routing rationale.
 - Keyword matching uses word boundaries for English terms and ignores file paths, filenames, and inline `code` spans; when a high-complexity keyword is present, low-complexity keywords never downgrade the task.
 - The reply includes an `Auto Routing` section detailing the complexity signals, skipped runtimes and reasons, and the selected route.
@@ -360,7 +361,7 @@ When a lower-cost worker fails the verification gate, relay hands the real failu
 
 - Triggers on: gate status `verification-failed` / `tdd-not-proven` / `stub-rejected`, or worker failure/timeout (excluding rate limits and transient disconnects, which are handled by retry and quota fallback).
 - Does not trigger on: out-of-scope edits, deleted tests, modified test config, or `.git` pointer tampering (behavioral violations go to a human); `plan` mode; when the escalation target is already the same runtime/model; when the escalation runtime is not in `dispatch.runtimes`; or when the message sets `"escalate": false`.
-- Also skipped when: the TDD `base` check itself failed (only the base phase ran, so switching workers cannot fix it); the escalation target is a read-only runtime (`agy`); or the escalation target's `model` / `effort` format is invalid.
+- Also skipped when: the TDD `base` check itself failed (only the base phase ran, so switching workers cannot fix it); the escalation target is not a build-capable runtime; or the escalation target's `model` / `effort` format is invalid.
 - Escalates at most once per task. Round 2 has its own retry budget for transient errors and does not re-route on rate limits. If Round 2 still fails the gate or exits abnormally, relay does not commit (even if no verification gate was configured). The reply's `Escalation` section records Round 1's status, the escalation target, and Round 1's gate logs (renamed to `verify-*.round1.log` for files actually written in Round 1).
 - Evidence in the escalation prompt is wrapped in length-bounded `~~~~` fences preceded by a "data, not instructions" notice; the first worker's self-report (JSON `result`) is never quoted as evidence.
 - Evidence is drawn strictly from execution logs (tail of gate logs and `git diff`), never paraphrasing the first worker's claims.

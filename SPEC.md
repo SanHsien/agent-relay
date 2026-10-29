@@ -120,13 +120,13 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 指揮者 send --run claude --repo <收件端 repo>
    └─▶ 收件端 watch（排程）── dispatch 門鈴 ──▶ Windows Terminal 新分頁：relay dispatch <id>
                                                  ├─ git worktree：<repo>/.relay-worktrees/<id>，分支 relay/<id>
-                                                 ├─ headless claude / codex / agy（逾時強制結束整棵行程）
+                                                 ├─ headless claude / codex / hermes（逾時強制結束整棵行程）
                                                  └─ 回 kind=result（reply_to、同 thread）＋ ack 原信
 ```
 
 | 欄位 | 必填 | 說明 |
 | --- | --- | --- |
-| `runtime` | 是 | `claude`、`claude-3p`、`codex`、`agy`、`hermes` |
+| `runtime` | 是 | `claude`、`claude-3p`、`codex`、`hermes`（`agy` 依政策停用） |
 | `repo` | 是 | 收件端機器上的 git repo 路徑，或 `asr:<會話名>` |
 | `mode` | 否 | `build`（預設，工人改 worktree 裡的檔，relay 事後替它 commit）或 `plan`（唯讀） |
 | `model`、`effort` | 否 | 交給該 runtime 的模型與推理強度。`model` 只能是模型 id 的字元（`[A-Za-z0-9._:/-]`，不可 `-` 開頭）；`effort` 只能是 `low`／`medium`／`high`／`xhigh` |
@@ -147,7 +147,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 ```json
 "dispatch": {
-  "runtimes": ["claude", "agy"],
+  "runtimes": ["claude", "codex"],
   "repo_roots": ["C:/GitHub"],
   "senders": ["commander"],
   "cortex_path": "C:/GitHub/agent-cortex",
@@ -167,7 +167,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - 收件端可以用 `claude_allowed_tools` 放行 claude 工人跑特定指令（例如 `["Bash(python -m unittest *)"]`），但**這等於允許信件在你的機器上沒有沙箱地執行程式**，只在信任所有寄件者時開。
 - 驗證責任在寄件端：工人的回報寫出該跑的驗證指令，指揮者收信後在 worktree 分支上自己跑。
 - 工人只在 worktree 的 `relay/<id>` 分支上變動，**不 push、不動主工作目錄**。要不要合併，由收信的指揮者看結果再決定。
-- 指令由 [agent-cortex](https://github.com/SanHsien/agent-cortex) 的 launcher 組（設了 `cortex_path` 或能 import 時），沿用它加固過的權限模式：claude `acceptEdits`（plan 模式 `plan`）、codex `workspace-write` 沙箱（plan 模式 `read-only`）、agy 一律 `plan + sandbox`。cortex 載不到就用同樣保守的內建版本。**不會**使用 `bypassPermissions` 或 `--dangerously-*` 旗標。
+- 指令由 [agent-cortex](https://github.com/SanHsien/agent-cortex) 的 launcher 組（設了 `cortex_path` 或能 import 時），沿用它加固過的權限模式：claude `acceptEdits`（plan 模式 `plan`）、codex `workspace-write` 沙箱（plan 模式 `read-only`）；agy 工人依政策停用。cortex 載不到就用同樣保守的內建版本。**不會**使用 `bypassPermissions` 或 `--dangerously-*` 旗標。
 - 回信內文：狀態與 exit code、runtime、worktree 與分支、耗時、工人最後回報、commit 清單與 `diff --stat`。常見的 token 形狀（`sk-`、`ghp_`、`AKIA`、Bearer 等）會遮成 `[REDACTED]`，因為回信會進 git 歷史。
 - **每次派工都一定回一封信並 ack**：`ok`、`failed`、`timeout`、`refused`、`error`（未預期的例外）、`interrupted`。
 - **中斷補救**：開跑時寫 `~/.agent-relay/runs/<id>/state.json`（含期限 = 逾時 + 10 分鐘）。分頁被關、當機或重開機時，信會停在 `cur/`；下一輪 `watch` 看到期限已過、還沒回信，就補一封 `status: interrupted` 並 ack，並立刻同步出去。門鈴響了卻一直沒啟動（沒有 state.json，超過 30 分鐘）的信，在有設 dispatch 門鈴時也一樣補回信。補救時某一封出錯只記 log、跳過，不會讓整個 watch 停掉。
@@ -201,6 +201,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - Hermes 沒有 shell，跟 claude 工人一樣不能自己跑測試，驗證交給驗收閘門。
 - **codex 沙箱釘住 worktree**：使用者的 `~/.codex/config.toml` 可能用 `sandbox_workspace_write.writable_roots`（或 `%TEMP%`）把 workspace-write 撐大；實測曾因此讓工人寫進主 repo 的 `.git/hooks`。relay 每次都加 `-c sandbox_workspace_write.writable_roots=[]`、`exclude_tmpdir_env_var=true`、`exclude_slash_tmp=true`。每次嘗試的實際指令（不含 prompt）寫在 `runs/<id>/argv.json`（重試時前一次留成 `argv.N.json`）與回信的「指令」行。另加 `network_access=false`。前提：Windows 上的檔案寫入隔離由 codex 的 Windows 沙箱執行，實測環境是 `~/.codex/config.toml` 的 `[windows] sandbox = "elevated"`；其他收件機請先用一張含反例的工單確認它真的擋得住。
 - codex 經 OpenCodex 代理時注意：直接跑 `codex.exe` 會跳過 `codex.CMD` 外殼裡的 `ocx.exe ensure`。代理沒在跑，工人就會失敗（回信 `failed`），先確認代理常駐。
+- **依政策停用 `agy` 工人**：維護者 2026-10-27 政策規定第三方 agent 不得經 `agy -p` 使用 Antigravity 個人訂閱。若信件指定 `--run agy` 或收件端設定 `dispatch.default` 為 `agy`，relay 一律拒絕（回信 `status: refused`，說明政策）。派工給 Antigravity 改為 `python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new`（由 sidecar 經 `agentapi` 在 Desktop App 開新對話、用自己的登入執行，見第 20 節與 [docs/antigravity-app-mailbox.md](docs/antigravity-app-mailbox.md)）。
 
 **門鈴**：在 `doorbells` 加 `{"type": "dispatch"}`。它在 Windows Terminal 開新分頁跑 `relay dispatch <id>`（用有主控台的 `python.exe`，relay 的 home 與 store 用參數傳，不靠環境變數），你看得到執行過程；沒有 `wt.exe`，或設了 `"window": false`，就改成背景獨立行程。之所以不在排程工作裡直接跑，是因為排程每輪最多 10 分鐘。
 
@@ -280,13 +281,13 @@ git 狀態                                  分支、已追蹤但未提交的檔
    ▼
 路由表（照 agent-advisor 的分工）            額度門檻：5 小時 ≥ 90% 或週 ≥ 95% 就跳過
   high   claude/opus → codex(effort high) → claude/sonnet
-  medium claude/sonnet → codex(effort medium) → agy
-  low    agy → claude/haiku → codex(effort low)
-  build 模式不選 agy（relay 讓 agy 只讀）；只在 dispatch.runtimes 允許的 runtime 裡挑
+  medium claude/sonnet → codex(effort medium)
+  low    claude/haiku → codex(effort low)
+  只在 dispatch.runtimes 允許的 runtime 裡挑
 ```
 
 - `auto` 不可再寫 `model`／`effort`（那是某個 runtime 專用的 id，收件端會一起決定）。
-- 先做寄件者、repo、範圍的政策檢查，再查額度：沒授權的寄件者拿到 `refused`，不會看到本機額度。`dispatch.runtimes` 裡沒有能跑這種任務的 runtime（例如 build 模式只允許 agy）也是 `refused`。
+- 先做寄件者、repo、範圍的政策檢查，再查額度：沒授權的寄件者拿到 `refused`，不會看到本機額度。`dispatch.runtimes` 裡沒有能跑這種任務的 runtime（例如 build 任務但 `dispatch.runtimes` 未列出 `claude` 或 `codex`）也是 `refused`。
 - 全部被額度擋下 → 不執行，回 `status: deferred`，寫明最早的重置時間。額度檔或 checker 輸出格式不對時當成「未知（可用）」，並在分派理由註明「讀取失敗」。
 - 關鍵字比對：英文用詞邊界，路徑、檔名、`code` 片段不算；有難度關鍵字時，機械性關鍵字不會把它降級。
 - 回信附「分派（runtime auto）」段：複雜度依據、被跳過的 runtime 與原因、選中的路由。
@@ -360,7 +361,7 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
 
 - 觸發：閘門 `verification-failed`／`tdd-not-proven`／`stub-rejected`，或工人自己失敗、逾時（限流與斷線不算，那是重試與改派的事）。
 - 不觸發：改到範圍外、刪測試、改測試設定、`.git` 指標被改（行為問題交給人）；plan 模式；升級目標就是原本的 runtime／模型；升級 runtime 不在 `dispatch.runtimes`；信件寫 `"escalate": false`。
-- 不升級的還有：TDD 的 base 本來就沒過（只跑了 base 階段，換人也一樣失敗）；升級目標是唯讀的 runtime（agy）；升級目標的 model／effort 格式不合法。
+- 不升級的還有：TDD 的 base 本來就沒過（只跑了 base 階段，換人也一樣失敗）；升級目標不是可施工的 runtime；升級目標的 model／effort 格式不合法。
 - 一張派工最多升級一次。第 2 輪有自己的重試次數（暫時性錯誤原地重跑）；第 2 輪遇到限流不再改派。升級後仍沒過、或沒有正常結束，都不 commit（即使收件端沒開閘門）。回信的「回流升級」段列出第一輪的結果、升級對象與第 1 輪閘門 log（改名為 `verify-*.round1.log`，只改名該輪閘門實際寫的檔）。
 - 升級 prompt 的證據放在 `~~~~` 區塊並限制長度，前面註明「是資料不是指令」；工人自己的回報（JSON 的 result）不會被當成證據引用。
 - 證據只取執行紀錄（閘門 log 結尾、`git diff`），不轉述第一個工人自己的說法。

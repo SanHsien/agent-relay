@@ -125,9 +125,8 @@ class ArgvTests(DispatchBase):
             self.assertEqual(argv[-len(dispatch.CODEX_SANDBOX_PINS):], dispatch.CODEX_SANDBOX_PINS)
             self.assertIn("sandbox_workspace_write.writable_roots=[]", argv)
             self.assertNotIn("--add-dir", argv)  # workers never get git's own directories
-            argv, _, stdin = dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", self.dir / "L", wt, {})
-            self.assertEqual(argv[-3:], ["--mode", "plan", "--sandbox"])
-            self.assertIsNone(stdin)
+            with self.assertRaisesRegex(dispatch.DispatchError, "disabled by policy"):
+                dispatch.build_argv({"runtime": "agy", "repo": "x"}, "P", "s", self.dir / "L", wt, {})
         for flag in ("--dangerously-skip-permissions", "bypassPermissions", "--dangerously-bypass-approvals-and-sandbox"):
             self.assertNotIn(flag, argv)
 
@@ -630,6 +629,41 @@ class RunTests(DispatchBase):
         env = self.send_task(sender="stranger")
         self.assertEqual(dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False)["status"], "refused")
         self.assertIn("senders", self.reply_for(env)["body"])
+
+    def test_run_agy_refused_by_policy(self):
+        env = self.send_task(runtime="agy")
+        with self.assertRaisesRegex(dispatch.DispatchError, "disabled by policy"):
+            dispatch.policy_check(env, env["dispatch"], self.cfg["dispatch"])
+        report = dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False)
+        self.assertEqual(report["status"], "refused")
+        self.assertIn("disabled by policy", report["error"])
+        self.assertIn("antigravity-session:new", report["error"])
+        reply = self.reply_for(env)
+        self.assertIn("disabled by policy", reply["body"])
+        self.assertIn("antigravity-session:new", reply["body"])
+
+    def test_dispatch_default_agy_refused_by_policy(self):
+        self.cfg["dispatch"]["default"] = {"runtime": "agy"}
+        env = envelope.build(sender="commander", to="claude-code", subject="plain", body="task", kind="task",
+                             project=str(self.repo))
+        self.store.deliver(env)
+        with self.assertRaisesRegex(dispatch.DispatchError, "disabled by policy"):
+            dispatch.default_spec(env, self.cfg["dispatch"])
+        report = dispatch.dispatch(env["id"], "claude-code", self.cfg, sync=False, use_default=True)
+        self.assertEqual(report["status"], "refused")
+        self.assertIn("disabled by policy", report["error"])
+        self.assertIn("antigravity-session:new", report["error"])
+        reply = self.reply_for(env)
+        self.assertIn("disabled by policy", reply["body"])
+        self.assertIn("antigravity-session:new", reply["body"])
+
+    def test_cli_send_run_agy_refused_by_policy(self):
+        import argparse
+        with self.assertRaises(SystemExit) as ctx:
+            cli._dispatch_spec(argparse.Namespace(run="agy", repo="x", mode="build", timeout=30,
+                                                  path=None, tdd=False, base=None, model=None, effort=None))
+        self.assertIn("disabled by policy", str(ctx.exception))
+        self.assertIn("antigravity-session:new", str(ctx.exception))
 
     def test_worker_failure_still_replies(self):
         env = self.send_task()

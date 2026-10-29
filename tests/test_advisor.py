@@ -51,11 +51,18 @@ class RoutingScenarioTests(unittest.TestCase):
     def test_medium_task_goes_to_sonnet(self):
         self.assertEqual(self.route("加 power 函式"), ("claude", "sonnet", None))
 
-    def test_mechanical_build_skips_read_only_agy(self):
+    def test_mechanical_build_never_routes_to_agy(self):
         self.assertEqual(self.route("README 錯字", "修正錯字"), ("claude", "haiku", None))
 
-    def test_mechanical_plan_uses_agy(self):
-        self.assertEqual(self.route("README 錯字檢查", "列出錯字", mode="plan")[0], "agy")
+    def test_mechanical_plan_routes_to_haiku(self):
+        self.assertEqual(self.route("README 錯字檢查", "列出錯字", mode="plan"), ("claude", "haiku", None))
+
+    def test_advise_never_returns_agy(self):
+        for subject in ("重構鎖的競態", "加 power 函式", "README 錯字檢查", "修除錯", "改名"):
+            for mode in ("build", "plan"):
+                with self.subTest(subject=subject, mode=mode):
+                    route = self.route(subject, mode=mode)
+                    self.assertNotEqual(route[0], "agy")
 
     def test_only_allowed_runtimes(self):
         self.assertEqual(self.route("重構鎖的競態", allowed=["codex"]), ("codex", None, "high"))

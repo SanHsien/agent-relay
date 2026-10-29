@@ -4,7 +4,7 @@
                                                          │ opens a Windows Terminal tab
                                                          ▼
                               relay dispatch <id>:  worktree relay/<id>
-                                                    → headless claude / codex / agy
+                                                    → headless claude / codex
                                                     → result envelope back (reply_to)
 
 The receiver decides what may run: `dispatch.runtimes`, `dispatch.repo_roots` and
@@ -15,8 +15,7 @@ worktree and never pushes; merging is left to whoever reviews the result.
 Command lines come from agent-cortex's launcher (SanHsien/agent-cortex,
 paulsha_cortex/coordinator/launcher.py) when it can be imported, so permission
 modes stay the ones cortex already hardened; the fallback builders below keep
-the same conservative defaults (claude acceptEdits, codex workspace-write sandbox,
-agy plan + sandbox).
+the same conservative defaults (claude acceptEdits, codex workspace-write sandbox).
 
 Every run ends in exactly one result envelope and an ack, whatever goes wrong.
 A run that dies without replying (tab closed, reboot) is found by `watch` through
@@ -44,6 +43,11 @@ from .store import Store
 from . import procs
 
 RUNTIMES = ("claude", "claude-3p", "codex", "agy", "hermes")
+AGY_POLICY_REASON = (
+    "agy worker is disabled by policy (2026-10-27: third-party agents must not use "
+    "Antigravity personal subscriptions via 'agy -p'; dispatch to the Desktop App via "
+    "'python -m agent_relay send --to antigravity --kind task --subject <subject> --project <repo> --ref antigravity-session:new' instead)"
+)
 MODES = ("build", "plan")
 EFFORTS = ("low", "medium", "high", "xhigh")
 BASE_RE = re.compile(r"[0-9a-f]{40}")  # full sha only: a short prefix can be brute-forced by anyone who can push to origin
@@ -173,6 +177,8 @@ def default_spec(env: dict, policy: dict) -> dict:
     default = policy.get("default")
     if not isinstance(default, dict) or not default.get("runtime"):
         raise DispatchError("plain task and no dispatch.default on this machine")
+    if default.get("runtime") == "agy":
+        raise DispatchError(AGY_POLICY_REASON)
     repo = env.get("project") or default.get("repo")
     if not repo:
         raise DispatchError("plain task without a repo: send it with --project <repo> (or set dispatch.default.repo)")
@@ -208,6 +214,8 @@ def policy_check(env: dict, spec: dict, policy: dict, allowed_signers: Path | No
             raise DispatchError(f"task is older than dispatch.max_age_hours ({max_age_h}); ask the sender to send it again")
     if policy.get("require_paths") and not spec.get("paths"):
         raise DispatchError("this machine requires dispatch.paths (the files the worker may change)")
+    if spec.get("runtime") == "agy":
+        raise DispatchError(AGY_POLICY_REASON)
     allowed = policy.get("runtimes") or []
     if spec["runtime"] == "auto":
         usable = advisor.PLAN_OK if spec.get("mode", "build") == "plan" else advisor.BUILD_OK
@@ -339,6 +347,8 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
     get write access to git's own directories; relay commits after they finish.
     """
     runtime, plan = spec["runtime"], spec.get("mode", "build") == "plan"
+    if runtime == "agy":
+        raise DispatchError(AGY_POLICY_REASON)
     model = spec.get("model")
     is_3p = runtime == "claude-3p"
     if is_3p:
@@ -367,7 +377,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
             argv = launcher.build_codex_argv(worktree=str(worktree), read_only=plan,
                                              effort=spec.get("effort"), **common)
             return _prompt_to_stdin(argv, prompt) + CODEX_SANDBOX_PINS, "agent-cortex", prompt
-        return launcher.build_agy_argv(**common), "agent-cortex", None
+        raise DispatchError(AGY_POLICY_REASON)
     if runtime == "claude":
         argv = ["claude", "-p", "--output-format", "json",
                 "--permission-mode", "plan" if plan else "acceptEdits", "--add-dir", str(worktree)]
@@ -385,7 +395,7 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
         argv += CODEX_SANDBOX_PINS
         stdin = prompt
     else:
-        argv, stdin = ["agy", "--print", prompt, "--mode", "plan", "--sandbox"], None
+        raise DispatchError(AGY_POLICY_REASON)
     if model:
         argv += ["--model", model]
     return argv, "built-in", stdin
@@ -731,7 +741,7 @@ def escalation_target(policy: dict, spec: dict, status: str, gate, outside: list
     if target.get("runtime") not in RUNTIMES or target["runtime"] not in (policy.get("runtimes") or []):
         return None
     if target["runtime"] not in advisor.BUILD_OK:
-        return None  # an escalation has to change files; agy runs read-only here
+        return None  # an escalation has to change files
     if ("model" in target and not MODEL_RE.fullmatch(str(target["model"]))) or \
             ("effort" in target and target["effort"] not in EFFORTS):
         return None

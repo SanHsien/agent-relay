@@ -4,12 +4,11 @@
 > 現況段的數字是 2026-10-29 依 `main` `a92207cb5833` 查的快照，開工前先重查 GitHub。
 
 ## 現況
-多 Agent 寄信、派工、回報的協定（`SPEC.md`）與參考 CLI（`python -m agent_relay`），file＋git mailbox，Windows 原生；功能與實測紀錄對照見 `README.md:77-99`。2026-10-29 查：open issue／PR 0，Dependabot 與 code scanning open 0，`main` 上 CI、CodeQL、Dependency freshness 最近一次皆 success，從未發過 release（2026-10-29 `gh release list -R SanHsien/agent-relay`、`gh run list -R SanHsien/agent-relay -b main`）。卡點是政策：`--run agy` 工人與 `advise` 的低複雜度路線仍以 `agy --print` 為首選（`agent_relay/advisor.py:47-48`、`agent_relay/dispatch.py:388`），與維護者 2026-10-27 的 Antigravity 個人訂閱政策衝突。
+多 Agent 寄信、派工、回報的協定（`SPEC.md`）與參考 CLI（`python -m agent_relay`），file＋git mailbox，Windows 原生；功能與實測紀錄對照見 `README.md:77-99`。2026-10-29 查：open issue／PR 0，Dependabot 與 code scanning open 0，`main` 上 CI、CodeQL、Dependency freshness 最近一次皆 success，從未發過 release（2026-10-29 `gh release list -R SanHsien/agent-relay`、`gh run list -R SanHsien/agent-relay -b main`）。維護者 2026-10-27 Antigravity 個人訂閱政策已落實：`--run agy` 工人與 `dispatch.default=agy` 已明確依政策拒絕，`advise` 路由已移除 agy，Antigravity 派法統一走 Desktop App 會話（`python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new`）。
 
 ## 近期：可以直接動手
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
-| 依政策停用 `agy` 工人：`send --run agy`／`dispatch.default=agy` 明確拒絕並說明政策；`advise` 的 `ROUTES` 移除 agy（low 路線改以 `claude haiku` 為首）；README 功能地圖與 SPEC 第 7 節同步，並寫明 Antigravity 的派法改為 `send --to antigravity --kind task --project <repo> --ref antigravity-session:new`（Desktop App 開新對話、用自己的登入執行） | 維護者 2026-10-27 政策：第三方 agent 不得經 `agy -p` 使用 Antigravity 個人訂閱；派工給 Desktop App 本身視同人下指令，是目前唯一被允許的 Antigravity 派法 | 新測試：`--run agy` 回 `DispatchError` 且訊息含政策理由；`advise` 對任何複雜度都不回 agy；`python -m unittest discover -s tests` 綠；`python tools/check_doc_parity.py` 綠（中英文件同步） | Claude Sonnet | `agent_relay/dispatch.py:46`、`:370`、`:388`；`agent_relay/advisor.py:47-51`；`README.md:83` |
 | `gc` 解析 `created_at` 在 Python 3.10 也接受非 3／6 位小數秒；CI 加跑 3.10 | `requires-python = ">=3.10"`，但 3.10 的 `datetime.fromisoformat` 只吃 3／6 位小數，CI 只跑 3.12 所以測不到 | 新測試餵 `2026-10-21T13:39:57.1Z` 等格式；CI 矩陣含 3.10 且綠 | Codex | `agent_relay/gc.py:119`；`pyproject.toml:5`；`.github/workflows/ci.yml`；解析修正與回歸測試已進 main（2026-10-29）；CI 尚未加 3.10，因為 3.10 全套有三項既有失敗：`tests/test_gates.py` 兩項（`agent_relay/gates.py` 的 `tomllib` 是 3.11+）與 `test_dispatch.ArgvTests.test_cortex_builder_used_when_available`，要先修好這三項才能加 3.10 並刪本列 |
 
 ## 中期：等條件成立再做

@@ -10,7 +10,7 @@
 
 - 協定規格：[SPEC.md](SPEC.md)
 - 給 Agent 的操作說明：[AGENTS.md](AGENTS.md)
-- Antigravity App 既有會話收信：[sidecar 安裝、簽章與驗收](docs/antigravity-app-mailbox.md)（不同於 `--run agy` 新開唯讀 CLI 工人）
+- Antigravity App 既有會話收信：[sidecar 安裝、簽章與驗收](docs/antigravity-app-mailbox.md)（依政策停用 `agy` 工人，改為 `python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new` 派給 Desktop App）
 - Nostr NIP-01 對接評估（欄位映射、簽章差異、結論）：[docs/nostr-nip01-evaluation.md](docs/nostr-nip01-evaluation.md)
 
 ## 快速開始
@@ -80,7 +80,7 @@ python -m agent_relay accept <回信 id> --repo C:\GitHub\<repo>  # 在本機重
 | --- | --- | --- | --- | --- |
 | 寄信、收信、跨機器同步 | `send`／`inbox`／`read`／`ack`／`sync` | 1–3 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-01 |
 | 門鈴（通知、Telegram、交接卡）、排程輪詢 | `watch`、`poller install` | 4–5 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-02 |
-| 信件自動開新 Session 施工（worktree） | `send --run claude\|codex\|agy\|hermes`、`dispatch` | 7 | [Phase 2](docs/evidence/2026-10-20-phase2.md) | T-20261018-15、T-20261017-31 |
+| 信件自動開新 Session 施工（worktree） | `send --run claude\|codex\|hermes`、`dispatch`（Antigravity 依政策停用 `agy` 工人，改為 `python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new` 派給 Desktop App） | 7 | [Phase 2](docs/evidence/2026-10-20-phase2.md) | T-20261018-15、T-20261017-31 |
 | 新 Session 自動接手（交接包） | `context`、`hooks/session_start.py` | 8 | [T-08](docs/evidence/2026-10-20-t08-handover.md) | T-20261019-08 |
 | 簽出鎖、範圍檢查、打卡紀錄 | `--path`、`claim`／`claims`／`release` | 9 | [T-07](docs/evidence/2026-10-20-t07-checkout.md) | T-20261019-07 |
 | 額度感知分派、斷線續跑 | `--run auto`、`advise` | 10 | [T-16](docs/evidence/2026-10-20-t16-advisor.md) | T-20261018-16 |

@@ -10,7 +10,7 @@ This repository also serves as the **master index** of the "Multi-Agent Dispatch
 
 - Protocol specification: [SPEC.en.md](SPEC.en.md) ([繁體中文](SPEC.md))
 - Operating guide for agents: [AGENTS.md](AGENTS.md)
-- Receiving mail in an existing Antigravity App conversation: [sidecar setup, signing, and acceptance](docs/antigravity-app-mailbox.en.md) (distinct from `--run agy`, which opens a new read-only CLI worker)
+- Receiving mail in an existing Antigravity App conversation: [sidecar setup, signing, and acceptance](docs/antigravity-app-mailbox.en.md) (`agy` worker disabled by policy; dispatch to Desktop App via `python -m agent_relay send --to antigravity --kind task --subject <subject> --project <repo> --ref antigravity-session:new` instead)
 - Nostr NIP-01 bridging evaluation (field mapping, signature gap, conclusion): [docs/nostr-nip01-evaluation.en.md](docs/nostr-nip01-evaluation.en.md)
 
 ## Quick Start
@@ -80,7 +80,7 @@ Commander ──send──▶ store/mailboxes/<worker>/new/ ──git push──
 | --- | --- | --- | --- | --- |
 | Send, receive, cross-machine sync | `send` / `inbox` / `read` / `ack` / `sync` | 1–3 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-01 |
 | Doorbells (toast, Telegram, handoff card), scheduled polling | `watch`, `poller install` | 4–5 | [Phase 1](docs/evidence/2026-10-20-phase1.md) | T-20261019-02 |
-| Auto-spawn new session from message (worktree) | `send --run claude\|codex\|agy\|hermes`, `dispatch` | 7 | [Phase 2](docs/evidence/2026-10-20-phase2.md) | T-20261018-15, T-20261017-31 |
+| Auto-spawn new session from message (worktree) | `send --run claude\|codex\|hermes`, `dispatch` (Antigravity `agy` worker disabled by policy; use `python -m agent_relay send --to antigravity --kind task --subject <subject> --project <repo> --ref antigravity-session:new` for Desktop App) | 7 | [Phase 2](docs/evidence/2026-10-20-phase2.md) | T-20261018-15, T-20261017-31 |
 | Auto hand-over for new sessions (hand-over bundle) | `context`, `hooks/session_start.py` | 8 | [T-08](docs/evidence/2026-10-20-t08-handover.md) | T-20261019-08 |
 | Check-out locks, scope check, audit trail | `--path`, `claim` / `claims` / `release` | 9 | [T-07](docs/evidence/2026-10-20-t07-checkout.md) | T-20261019-07 |
 | Quota-aware routing, auto-retry on disconnect | `--run auto`, `advise` | 10 | [T-16](docs/evidence/2026-10-20-t16-advisor.md) | T-20261018-16 |

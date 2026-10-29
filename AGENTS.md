@@ -23,7 +23,7 @@ python -m agent_relay ack <id>
 - 要讓收件端專案下一個 session `/pickup` 接得到，加 `--project <收件端機器上的專案路徑>`；不知道路徑就寫 `--project asr:<會話名>`，收件端會從 agent-session-restore 的登記檔查。
 - 信件會進 git 歷史：不放 API key、token、密碼。
 - 派工信要簽章（SPEC 第 13 節）：寄件端先 `relay keygen`，把公鑰交給收件端，由收件端 `relay trust <你的信箱> <公鑰>`。有金鑰時 `send` 會自動簽章。收件端 `dispatch.senders` 沒設就拒絕所有派工。
-- 要收件端**自動開新 Session 施工**：加 `--run claude|claude-3p|codex|agy|hermes --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節）。claude-3p 走維護者的 Claude Desktop 3P gateway（見 SPEC 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。不確定派給誰就寫 `--run auto`，收件端依複雜度與它的額度挑（SPEC 第 10 節）；`--path` 寫出工人可改的檔案範圍（SPEC 第 9 節）。
+- 要收件端**自動開新 Session 施工**：加 `--run claude|claude-3p|codex|hermes --repo <收件端 repo>`（見 [SPEC.md](SPEC.md) 第 7 節；`agy` 工人依政策停用，Antigravity 派法改見第 20 節與 `--ref antigravity-session:new`）。claude-3p 走維護者的 Claude Desktop 3P gateway（見 SPEC 第 7 節）。收件端要先在 config 的 `dispatch` 允許該 runtime 與 repo。不確定派給誰就寫 `--run auto`，收件端依複雜度與它的額度挑（SPEC 第 10 節）；`--path` 寫出工人可改的檔案範圍（SPEC 第 9 節）。
 
 ## 信箱名稱
 
@@ -70,7 +70,7 @@ Result bodies must attach concrete evidence: test output, commit SHA, and file p
 - To drop a handoff card for the next `/pickup` session in the target project on the receiver, pass `--project <project-path-on-receiver>`; if the path is unknown, pass `--project asr:<session-name>` so the receiver resolves it from the `agent-session-restore` registry.
 - Messages enter git history: never include API keys, tokens, or passwords.
 - Task dispatches must be signed (SPEC Section 13): run `relay keygen` on the sender, give the public key to the receiver, and run `relay trust <your-mailbox> <pubkey>` on the receiver. When a key exists, `send` signs automatically. If `dispatch.senders` is unset on the receiver, all dispatches are refused.
-- To make the receiver **automatically spawn a new worker session**: pass `--run claude|claude-3p|codex|agy|hermes --repo <receiver-repo>` (see [SPEC.en.md](SPEC.en.md) Section 7). `claude-3p` routes through the local Claude Desktop 3P gateway. The receiver must allow that runtime and repository under `dispatch` in `config.json`. Pass `--run auto` to let the receiver pick based on complexity and local quota (SPEC Section 10), and `--path` to restrict the files the worker may modify (SPEC Section 9).
+- To make the receiver **automatically spawn a new worker session**: pass `--run claude|claude-3p|codex|hermes --repo <receiver-repo>` (see [SPEC.en.md](SPEC.en.md) Section 7; the `agy` worker is disabled by policy, use `--ref antigravity-session:new` and Section 20 instead). `claude-3p` routes through the local Claude Desktop 3P gateway. The receiver must allow that runtime and repository under `dispatch` in `config.json`. Pass `--run auto` to let the receiver pick based on complexity and local quota (SPEC Section 10), and `--path` to restrict the files the worker may modify (SPEC Section 9).
 
 ## Mailbox Names
 
