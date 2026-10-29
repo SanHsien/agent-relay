@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +27,26 @@ def git(*args, cwd):
 
 
 class GcTests(unittest.TestCase):
+    def test_done_mail_fractional_seconds_on_both_sides_of_cutoff(self):
+        cutoff = datetime(2026, 10, 21, 13, 39, 57, 123455, tzinfo=timezone.utc).timestamp()
+        for fraction, microseconds in (("", 0), ("1", 100000), ("12", 120000), ("123", 123000),
+                                        ("1234", 123400), ("12345", 123450), ("123456", 123456),
+                                        ("1234567", 123456)):
+            for offset in ("Z", "+02:00", "-02:00"):
+                with self.subTest(fraction=fraction, offset=offset), tempfile.TemporaryDirectory() as tmp, \
+                        mock.patch.dict(os.environ, {"AGENT_RELAY_HOME": tmp}):
+                    cfg = {"store": str(Path(tmp) / "store")}
+                    store = Store(cfg["store"])
+                    env = envelope.build(sender="commander", to="codex", subject="old mail", body="")
+                    hour = {"Z": "13", "+02:00": "15", "-02:00": "11"}[offset]
+                    suffix = f".{fraction}" if fraction else ""
+                    env["created_at"] = f"2026-10-21T{hour}:39:57{suffix}{offset}"
+                    store.deliver(env)
+                    store.ack("codex", env["id"])
+                    actions = gc.plan(cfg, "codex", now=cutoff + 14 * 86400)
+                    ids = {a["id"] for a in actions if a["kind"] == "done-mail"}
+                    self.assertEqual(env["id"] in ids, microseconds < 123455)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

@@ -211,8 +211,6 @@ def cmd_accept(args, cfg) -> int:
     try:
         report = accepter.accept(cfg, _agent(args, cfg), args.id, Path(args.repo), args.into, sync=not args.no_sync,
                                  push=args.push)
-    except (accepter.AcceptError, StoreError) as exc:  # a local problem: nothing was recorded or changed
-        raise SystemExit(f"error: {exc}") from exc
     except subprocess.SubprocessError as exc:  # git timed out before anything was changed
         raise SystemExit(f"error: {type(exc).__name__}: {exc}") from exc
     lines = [f"{k}: {v}" for k, v in report.items() if k not in ("verify", "notes")]
@@ -227,10 +225,7 @@ def cmd_accept(args, cfg) -> int:
 def cmd_keygen(args, cfg) -> int:
     agent = _agent(args, cfg)
     key = Path(args.key).expanduser().resolve() if args.key else signing.default_key(config.home(), agent)
-    try:
-        public = signing.keygen(key, agent)
-    except signing.SigningError as exc:
-        raise SystemExit(f"error: {exc}") from exc
+    public = signing.keygen(key, agent)
     if args.key:  # a non-default location has to be in the config to be used
         path = config.home() / "config.json"
         current = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -246,10 +241,7 @@ def cmd_trust(args, cfg) -> int:
     text = sys.stdin.read() if source == "-" else (
         Path(source).read_text(encoding="utf-8") if Path(source).is_file() else source)
     allowed = signing.settings(cfg, config.home())[1]
-    try:
-        signing.trust(allowed, args.agent, text.strip())
-    except signing.SigningError as exc:
-        raise SystemExit(f"error: {exc}") from exc
+    signing.trust(allowed, args.agent, text.strip())
     _out(args, {"agent": args.agent, "allowed_signers": str(allowed)},
          f"{args.agent} may now sign envelopes for this machine ({allowed})")
     return 0
@@ -337,10 +329,7 @@ def cmd_status(args, cfg) -> int:
 
 def cmd_gc(args, cfg) -> int:
     agent = _agent(args, cfg)
-    try:
-        actions = relay_gc.plan(cfg, agent, args.older_than, args.repo, force=args.force)
-    except relay_gc.GcError as exc:
-        raise SystemExit(f"error: {exc}") from exc
+    actions = relay_gc.plan(cfg, agent, args.older_than, args.repo, force=args.force)
     if args.apply:
         relay_gc.apply(actions)
         if any(a["kind"] == "done-mail" and a.get("done") for a in actions):
@@ -597,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = config.load()
     try:
         return args.func(args, cfg)
-    except (StoreError, envelope.EnvelopeError, gitsync.SyncError, dispatcher.DispatchError, OSError) as exc:
+    except (StoreError, envelope.EnvelopeError, gitsync.SyncError, dispatcher.DispatchError,
+            signing.SigningError, relay_gc.GcError, accepter.AcceptError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -263,6 +264,24 @@ class PollerTests(unittest.TestCase):
 
 
 class CliTests(Base):
+    def test_domain_errors_return_two_without_traceback(self):
+        cases = (
+            (["send", "--to", "codex", "--subject", "s"], cli.signing, "settings", cli.signing.SigningError),
+            (["keygen"], cli.signing, "keygen", cli.signing.SigningError),
+            (["trust", "codex", "invalid"], cli.signing, "trust", cli.signing.SigningError),
+            (["gc"], cli.relay_gc, "plan", cli.relay_gc.GcError),
+            (["accept", "reply-id", "--repo", "."], cli.accepter, "accept", cli.accepter.AcceptError),
+        )
+        cfg = {"agent": "commander", "store": str(self.dir / "store")}
+        for argv, module, method, error in cases:
+            with self.subTest(command=argv[0]), \
+                    mock.patch.object(cli.config, "load", return_value=cfg), \
+                    mock.patch.object(module, method, side_effect=error("test failure")), \
+                    mock.patch("sys.stdout"), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(cli.main([*argv, "--no-sync"]), 2)
+                self.assertTrue(err.getvalue().startswith("error:"), err.getvalue())
+                self.assertNotIn("Traceback", err.getvalue())
+
     def test_version(self):
         result = subprocess.run(
             [sys.executable, "-m", "agent_relay", "--version"],

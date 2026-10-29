@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -116,7 +117,10 @@ def plan(cfg: dict, agent: str, days: float = DEFAULT_DAYS, repos: list[str] | N
     kept_replies = {s.get("reply_id") for s in _all_states().values()} - {s.get("reply_id") for s in finished.values()}
     store = Store(cfg["store"])
     for _, env in store.list(agent, ("done",)):
-        created = datetime.fromisoformat(str(env["created_at"]).replace("Z", "+00:00")).timestamp()
+        # Python 3.10 accepts only 3 or 6 fractional digits; retain microsecond precision.
+        stamp = re.sub(r"\.(\d+)(?=Z|[+-]\d{2}:\d{2}$)",
+                       lambda m: "." + (m[1] + "000000")[:6], str(env["created_at"]))
+        created = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
         if created < cutoff and not (env["kind"] == "note" and env.get("reply_to") in kept_replies):
             actions.append({"kind": "done-mail", "path": str(store.box(agent, "done") / f"{env['id']}.json"),
                             "id": env["id"]})
