@@ -46,7 +46,7 @@ Create `~/.agent-relay-antigravity/config.json` with `store` pointing to your ex
 }
 ```
 
-`conversation_id` is pinned by the receiver; messages cannot arbitrarily pick a conversation. `repos` is a non-empty list where every path must be an existing directory, allowing the bound conversation to accept tasks for any repo in the list; the message's `--project` must be in the list, and the notification text cites that message's own project path (for messages that carry only a session ref and no project, the notification states that the scope is defined by the message). The legacy single-string `repo` key remains supported as a single-element `repos` list, while specifying both `repos` and `repo` raises an error. When multiple repos share a single conversation, the file-scope isolation note above still applies. An empty `senders` list disables notifications altogether. Key generation and trust setup follow SPEC §13:
+`conversation_id` is pinned by the receiver; messages cannot arbitrarily pick a conversation (the one exception is a conversation the sidecar itself opened via `antigravity-session:new`, see Section 3). `repos` is a non-empty list where every path must be an existing directory, allowing the bound conversation to accept tasks for any repo in the list; the message's `--project` must be in the list, and the notification text cites that message's own project path (for messages that carry only a session ref and no project, the notification states that the scope is defined by the message). The legacy single-string `repo` key remains supported as a single-element `repos` list, while specifying both `repos` and `repo` raises an error. When multiple repos share a single conversation, the file-scope isolation note above still applies. An empty `senders` list disables notifications altogether. Key generation and trust setup follow SPEC §13:
 
 ```powershell
 python -m agent_relay keygen --home "$HOME/.agent-relay-antigravity"
@@ -88,10 +88,26 @@ Do not install a separate Windows Task Scheduler poller for this mailbox: the si
 python -m agent_relay send --to antigravity --kind task --project C:/GitHub/target-repo --subject "Single verification task" --body-file task.md
 ```
 
-You can also pass `--ref antigravity-session:<UUID>` to target the conversation bound on the receiver; if `--project` is also present, the project must match as well. Do not pass `--run`. When an existing message already carries the right session ref, reuse it directly—do not resend or mutate a signed envelope.
+You can also pass `--ref antigravity-session:<UUID>` to target the conversation bound on the receiver, or a conversation the sidecar itself opened (see "Sending follow-ups to a relay-opened conversation" below); if `--project` is also present, the project must match as well. Do not pass `--run`. When an existing message already carries the right session ref, reuse it directly—do not resend or mutate a signed envelope.
 If an external agent (such as Claude Code, Codex, or Hermes) wants to **open a brand-new top-level visible conversation (`nestingDepth: 0`) in the Antigravity Desktop left sidebar** to execute the task, pass `--ref antigravity-session:new --project C:/GitHub/target-repo` (must be `kind=task` with `--project` in the `repos` allowlist): the sidecar invokes `agentapi new-conversation --title="[Relay] <message-id>"` to create a top-level conversation and records the returned `conversationId` in `app-delivery/<message-id>.json`.
 
-Follow-up feedback on the same task can use `--kind reply --reply-to <original-id>` with the same session ref or project; it goes through the same signature, sender, and target-conversation checks. This is a follow-up message, not a duplicate task. `note` and `result` messages do not wake this receiver.
+Follow-up feedback on the same task can use `--kind reply --reply-to <original-id>` with the same session ref or project (for a conversation opened via `new`, pass that conversation's UUID, see the next section); it goes through the same signature, sender, and target-conversation checks. This is a follow-up message, not a duplicate task. `note` and `result` messages do not wake this receiver.
+
+### Sending follow-ups to a relay-opened conversation
+
+To stop, question, or correct a conversation that was opened with `--ref antigravity-session:new`, you do not need to open yet another conversation to relay the message: send a `reply` (or `task`) that names that conversation's UUID. Take the UUID from the `conversation_id` field of the receiver's `app-delivery/<original-id>.json`.
+
+```powershell
+python -m agent_relay send --to antigravity --kind reply --reply-to <original-id> --ref antigravity-session:<conversation-UUID> --subject "Stop: worktree under review, do not edit" --body-file stop.md
+```
+
+The sidecar then delivers with `agentapi send-message <UUID>`, provided that:
+
+- The UUID equals the conversation bound in the config, **or** it appears in a local `app-delivery/*.json` receipt whose `mode` is `new-conversation` and whose `status` is `notified`. A UUID the relay never opened, or one whose receipt is `failed` / `refused` / `uncertain` / `attempting`, is skipped and writes no receipt.
+- Every other check is unchanged: valid signature, `senders` allowlist, `max_age_hours` window, `--project` (when given) in `repos`, no `dispatch` section, and one notification per message. `kind` is limited to `task` and `reply`.
+- The UUID must be in lowercase hyphenated form, and a message may carry only one session ref. The receipt of a follow-up records `mode: follow-up` and never authorizes any other UUID.
+
+The sender does not derive the UUID from the original message automatically: receipts live only on the receiver's machine, not in the shared store, so the sender passes `--ref` explicitly.
 
 The notification contains only the message ID and fixed inbox instructions—never putting the subject, body, or external commands into process arguments. Sending the notification does not mark the message read or acknowledged; the receiving conversation performs those steps itself and must attach concrete evidence in its reply. A valid signature proves sender identity, not that the requested actions are safe; the conversation must still obey its existing permissions, scope, and human confirmation rules.
 
@@ -105,7 +121,7 @@ Use a single test task and stop once the checklist below is satisfied:
 
 Local delivery receipts are stored in `~/.agent-relay-antigravity/app-delivery/<message-id>.json`:
 
-- `notified`: the notification command exited 0; the same message will not be notified again.
+- `notified`: the notification command exited 0; the same message will not be notified again. A follow-up to a relay-opened conversation additionally records `mode: follow-up`.
 - `failed`: the command exited non-zero; no automatic retry—inspect the App sidecar error logs first.
 - `refused`: signature verification failed, with the reason recorded in the receipt; the refusal is printed once and silently skipped on subsequent cycles.
 - `uncertain` / `attempting`: timed out or interrupted mid-flight; delivery may already have succeeded. Check the target conversation first and **do not blindly resend**.

@@ -252,5 +252,179 @@ class AppDeliveryTests(unittest.TestCase):
         self.run.assert_not_called()
 
 
+class RelayOpenedConversationFollowupTests(unittest.TestCase):
+    """Follow-ups (stop, clarify, correct) to a conversation this relay itself opened."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name)
+        self.repo = self.home / 'repo'
+        self.repo.mkdir()
+        self.session = '11111111-1111-4111-8111-111111111111'
+        self.spawned = '22222222-2222-4222-8222-222222222222'
+        self.cfg = {
+            'agent': 'antigravity', 'store': str(self.home / 'store'),
+            'antigravity': {'conversation_id': self.session, 'repo': str(self.repo),
+                            'senders': ['commander'], 'agentapi_argv': [str(self.home / 'app.exe'), 'agentapi']},
+        }
+        (self.home / 'config.json').write_text(json.dumps(self.cfg), encoding='utf-8')
+        self.verify = mock.patch.object(antigravity.signing, 'verify', return_value=None).start()
+        self.run = mock.patch.object(antigravity.procs, 'run', return_value=mock.Mock(returncode=0)).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def receipt(self, name, **value):
+        folder = self.home / 'app-delivery'
+        folder.mkdir(exist_ok=True)
+        (folder / f'{name}.json').write_text(json.dumps(value), encoding='utf-8')
+
+    def opened(self, conversation_id=None, **kw):
+        values = dict(status='notified', mode='new-conversation', conversation_id=conversation_id or self.spawned)
+        values.update(kw)
+        self.receipt('seed-new', **values)
+
+    def mail(self, **kw):
+        values = dict(sender='commander', to='antigravity', kind='reply', subject='stop & title',
+                      body='stop editing the worktree', refs=[f'antigravity-session:{self.spawned}'])
+        values.update(kw)
+        created = values.pop('created_at', None)
+        mail = envelope.build(**values)
+        if created:
+            mail['created_at'] = created
+        Store(self.cfg['store']).deliver(mail)
+        return mail
+
+    def deliver(self):
+        return antigravity.deliver_once(self.home, sync=False)
+
+    def test_followup_to_relay_opened_conversation_uses_send_message(self):
+        self.opened()
+        mail = self.mail()
+        result = self.deliver()
+        self.assertEqual(result['status'], 'notified')
+        self.assertEqual(result['conversation_id'], self.spawned)
+        argv = self.run.call_args.args[0]
+        self.assertEqual(argv[2:4], ['send-message', self.spawned])
+        self.assertIn(mail['id'], argv[-1])
+        self.assertNotIn(mail['subject'], ' '.join(argv))
+        self.assertNotIn(mail['body'], ' '.join(argv))
+        receipt = json.loads((self.home / 'app-delivery' / f"{mail['id']}.json").read_text())
+        self.assertEqual((receipt['status'], receipt['conversation_id']), ('notified', self.spawned))
+        self.assertNotEqual(receipt.get('mode'), 'new-conversation')
+        self.run.assert_called_once()
+
+    def test_followup_accepts_task_kind_and_listed_project_but_not_note_or_result(self):
+        self.opened()
+        self.mail(kind='note')
+        self.mail(kind='result')
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+        self.mail(kind='task', project=str(self.repo))
+        self.assertEqual(self.deliver()['status'], 'notified')
+        self.assertEqual(self.run.call_args.args[0][2:4], ['send-message', self.spawned])
+
+    def test_conversation_relay_never_opened_is_skipped(self):
+        self.opened(conversation_id='33333333-3333-4333-8333-333333333333')
+        self.mail()
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_no_receipts_at_all_means_only_bound_session_is_reachable(self):
+        self.mail()
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_receipt_that_is_not_a_successful_new_conversation_does_not_authorize(self):
+        cases = {
+            'failed': dict(status='failed', mode='new-conversation'),
+            'refused': dict(status='refused', mode='new-conversation'),
+            'attempting': dict(status='attempting', mode='new-conversation'),
+            'uncertain': dict(status='uncertain', mode='new-conversation'),
+            'notified-but-not-new-conversation': dict(status='notified'),
+            'follow-up-receipt': dict(status='notified', mode='follow-up'),
+        }
+        for name, extra in cases.items():
+            with self.subTest(name):
+                self.receipt('seed-new', conversation_id=self.spawned, **extra)
+                self.mail()
+                self.assertEqual(self.deliver()['status'], 'idle')
+                self.run.assert_not_called()
+
+    def test_malformed_receipts_and_refs_are_ignored_not_fatal(self):
+        self.spawned = 'abcdefab-cdef-4bcd-8fab-cdefabcdefab'  # has letters, so upper() differs
+        folder = self.home / 'app-delivery'
+        folder.mkdir()
+        (folder / 'junk.json').write_text('{not json', encoding='utf-8')
+        (folder / 'list.json').write_text('[1, 2]', encoding='utf-8')
+        self.opened()
+        self.receipt('bad-id', status='notified', mode='new-conversation', conversation_id='not-a-uuid')
+        self.receipt('bad-type', status='notified', mode='new-conversation', conversation_id=7)
+        self.mail(refs=['antigravity-session:not-a-uuid'])
+        self.mail(refs=[f'antigravity-session:{self.spawned.upper()}'])
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_ambiguous_refs_are_skipped(self):
+        self.opened()
+        self.mail(refs=[f'antigravity-session:{self.spawned}', f'antigravity-session:{self.session}'])
+        self.mail(refs=[f'antigravity-session:{self.spawned}', 'antigravity-session:new'], kind='task',
+                  project=str(self.repo))
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_unlisted_project_is_still_skipped_for_relay_opened_conversation(self):
+        self.opened()
+        self.mail(project=str(self.home / 'unlisted'))
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_untrusted_sender_expired_or_dispatch_mail_never_reaches_relay_opened_conversation(self):
+        self.opened()
+        self.mail(sender='mallory')
+        self.mail(created_at='2000-01-01T00:00:00Z')
+        self.mail(kind='task', dispatch={'runtime': 'agy', 'repo': str(self.repo), 'mode': 'plan'})
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_not_called()
+
+    def test_bad_signature_is_refused_and_not_delivered_to_relay_opened_conversation(self):
+        self.opened()
+        mail = self.mail()
+        self.verify.return_value = 'bad signature'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.deliver()['status'], 'idle')
+        receipt = json.loads((self.home / 'app-delivery' / f"{mail['id']}.json").read_text())
+        self.assertEqual(receipt['status'], 'refused')
+        self.run.assert_not_called()
+
+    def test_failed_followup_is_recorded_and_not_retried(self):
+        self.opened()
+        self.mail()
+        self.run.return_value = mock.Mock(returncode=1, stderr='endpoint unavailable')
+        self.assertEqual(self.deliver()['status'], 'failed')
+        self.assertEqual(self.deliver()['status'], 'idle')
+        self.run.assert_called_once()
+
+    def test_bound_session_and_new_conversation_behaviour_unchanged(self):
+        self.opened()
+        self.mail(refs=[f'antigravity-session:{self.session}'])
+        self.assertEqual(self.deliver()['status'], 'notified')
+        self.assertEqual(self.run.call_args.args[0][2:4], ['send-message', self.session])
+        mail = self.mail(kind='task', refs=['antigravity-session:new'], project=str(self.repo))
+        self.run.return_value = mock.Mock(returncode=0, stdout=json.dumps(
+            {'response': {'newConversation': {'conversationId': self.spawned}}}))
+        self.assertEqual(self.deliver()['mode'], 'new-conversation')
+        self.assertEqual(self.run.call_args.args[0][2:4], ['new-conversation', f"--title=[Relay] {mail['id']}"])
+
+    def test_end_to_end_open_then_stop_follow_up(self):
+        first = self.mail(kind='task', refs=['antigravity-session:new'], project=str(self.repo))
+        self.run.return_value = mock.Mock(returncode=0, stdout=json.dumps(
+            {'response': {'newConversation': {'conversationId': self.spawned}}}))
+        self.assertEqual(self.deliver()['mode'], 'new-conversation')
+        stop = self.mail(reply_to=first['id'])
+        self.run.return_value = mock.Mock(returncode=0)
+        self.assertEqual(self.deliver()['id'], stop['id'])
+        self.assertEqual(self.run.call_args.args[0][2:4], ['send-message', self.spawned])
+
+
 if __name__ == '__main__':
     unittest.main()

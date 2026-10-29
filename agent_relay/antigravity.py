@@ -1,5 +1,6 @@
 """Antigravity App sidecar: notify one explicitly configured existing conversation,
-or open a new top-level Desktop conversation when mail carries `antigravity-session:new`.
+open a new top-level Desktop conversation when mail carries `antigravity-session:new`, and
+send follow-ups to conversations this sidecar itself opened (`antigravity-session:<uuid>`).
 
 Uses the App's agentapi, not agy CLI's separate conversation store. Only message
 IDs and fixed relay commands enter the notification; mail text is never argv.
@@ -56,6 +57,34 @@ def _repos(settings: dict) -> set[Path]:
     return repos
 
 
+def _canonical_uuid(value: object) -> str | None:
+    """Lowercase hyphenated form of a UUID string, or None for anything else (including
+    other spellings of a valid UUID: a ref must name the conversation exactly)."""
+    try:
+        canonical = str(uuid.UUID(value))  # type: ignore[arg-type]
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return canonical if canonical == value else None
+
+
+def _opened_sessions(state_dir: Path) -> set[str]:
+    """Conversations this sidecar opened itself: local receipts of a successful
+    `new-conversation` delivery. Nothing else (failed, refused, uncertain, a bare
+    notification, a follow-up, or a hand-written file without that shape) vouches for a UUID."""
+    opened: set[str] = set()
+    for path in state_dir.glob('*.json'):
+        try:
+            receipt = json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            continue
+        if (isinstance(receipt, dict) and receipt.get('mode') == 'new-conversation'
+                and receipt.get('status') == 'notified'):
+            conversation = _canonical_uuid(receipt.get('conversation_id'))
+            if conversation:
+                opened.add(conversation)
+    return opened
+
+
 def _deliver(home: Path, *, sync: bool) -> dict:
     """At most one notification per cycle; attempted sends are never auto-retried."""
     cfg = json.loads((home / 'config.json').read_text(encoding='utf-8'))
@@ -75,6 +104,7 @@ def _deliver(home: Path, *, sync: bool) -> dict:
     state_dir = home / 'app-delivery'
     state_dir.mkdir(parents=True, exist_ok=True)
     _, allowed = signing.settings(cfg, home)
+    opened = _opened_sessions(state_dir)
     for state, mail in Store(cfg['store']).list(agent):
         if state != 'new' or mail['kind'] not in ('task', 'reply') or mail['from'] not in senders:
             continue
@@ -82,9 +112,15 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         refs = mail.get('refs', [])
         session_refs = [ref for ref in refs if ref.startswith('antigravity-session:')]
         new_conv = session_refs == ['antigravity-session:new']
-        if session_refs:
-            if not new_conv and session_refs != [f'antigravity-session:{session}']:
+        target_session = session
+        if new_conv:
+            target_session = 'new'
+        elif session_refs:
+            # Exactly one explicit ref: the bound conversation, or one this sidecar opened.
+            named = _canonical_uuid(session_refs[0].removeprefix('antigravity-session:'))
+            if len(session_refs) != 1 or named is None or (named != session and named not in opened):
                 continue
+            target_session = named
         elif not mail.get('project'):
             continue
         if new_conv and (mail['kind'] != 'task' or not mail.get('project')):
@@ -112,7 +148,6 @@ def _deliver(home: Path, *, sync: bool) -> dict:
             print(json.dumps({'id': mail['id'], 'status': 'refused', 'reason': reason}), flush=True)
             continue
         receipt = state_dir / f"{mail['id']}.json"
-        target_session = 'new' if new_conv else session
         try:
             with receipt.open('x', encoding='utf-8') as out:
                 json.dump({'status': 'attempting', 'conversation_id': target_session}, out)
@@ -132,10 +167,12 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         result = {'id': mail['id'], 'conversation_id': target_session}
         if new_conv:
             result['mode'] = 'new-conversation'
+        elif target_session != session:
+            result['mode'] = 'follow-up'  # never 'new-conversation': it must not vouch for anything
         cmd = (
             [*argv, 'new-conversation', f"--title=[Relay] {mail['id']}", notification]
             if new_conv else
-            [*argv, 'send-message', session, notification]
+            [*argv, 'send-message', target_session, notification]
         )
         try:
             proc = procs.run(cmd,

@@ -46,7 +46,7 @@ App sidecar（每 5 分鐘 pull）<----------+
 }
 ```
 
-`conversation_id` 由收件端明確指定，不讓信件任意選會話。`repos` 是非空清單，每個路徑都必須是既有目錄，同一個會話接受清單內任一 repo 的工單；信件的 `--project` 必須在清單內，通知文字會寫該信自己的 project 路徑（只有 session ref、沒有 project 的信，則寫範圍以信件所定義為準）。舊設定的單一字串 `repo` 仍可用，等同只有一個元素的 `repos`；`repos` 與 `repo` 同時出現會報錯。多個 repo 共用同一會話時，上方的檔案範圍隔離提醒照樣適用。寄件者空清單就不通知。金鑰與信任設定沿用 SPEC §13：
+`conversation_id` 由收件端明確指定，不讓信件任意選會話（唯一例外是 sidecar 自己用 `antigravity-session:new` 開出的對話，見第 3 節）。`repos` 是非空清單，每個路徑都必須是既有目錄，同一個會話接受清單內任一 repo 的工單；信件的 `--project` 必須在清單內，通知文字會寫該信自己的 project 路徑（只有 session ref、沒有 project 的信，則寫範圍以信件所定義為準）。舊設定的單一字串 `repo` 仍可用，等同只有一個元素的 `repos`；`repos` 與 `repo` 同時出現會報錯。多個 repo 共用同一會話時，上方的檔案範圍隔離提醒照樣適用。寄件者空清單就不通知。金鑰與信任設定沿用 SPEC §13：
 
 ```powershell
 python -m agent_relay keygen --home "$HOME/.agent-relay-antigravity"
@@ -88,10 +88,26 @@ App 提供 sidecar 的 `ANTIGRAVITY_LS_ADDRESS` 與 `agentapi` 環境。一般 s
 python -m agent_relay send --to antigravity --kind task --project C:/GitHub/target-repo --subject "單項試驗" --body-file task.md
 ```
 
-也可用 `--ref antigravity-session:<UUID>` 指定已在收件端綁定的會話；若同時有 `--project`，專案也必須相符。不加 `--run`。既有信件已有正確 session ref 時直接沿用，不重寄、不修改簽過的信封。
+也可用 `--ref antigravity-session:<UUID>` 指定已在收件端綁定的會話，或 sidecar 自己開出的對話（見下方「對 relay 開出的對話送後續訊息」）；若同時有 `--project`，專案也必須相符。不加 `--run`。既有信件已有正確 session ref 時直接沿用，不重寄、不修改簽過的信封。
 若外部 Agent（如 Claude Code、Codex、Hermes）希望在 **Antigravity Desktop 左側對話列表自動開一個全新的頂層可視對話**（`nestingDepth: 0`）來執行該工單，可帶 `--ref antigravity-session:new --project C:/GitHub/target-repo`（必須為 `kind=task` 且 `--project` 在 `repos` 白名單內）：sidecar 會呼叫 `agentapi new-conversation --title="[Relay] <信件ID>"` 建立頂層新會話，並將回傳的新 `conversationId` 記錄於 `app-delivery/<信件ID>.json`。
 
-同一工單的修正意見可用 `--kind reply --reply-to <原信 ID>`，同樣加上 session ref 或 project；沿用相同的簽章、寄件者與目的會話檢查。這是後續訊息，不是重開一張相同工單。`note`／`result` 不會喚醒這個收件端。
+同一工單的修正意見可用 `--kind reply --reply-to <原信 ID>`，同樣加上 session ref 或 project（對 `new` 開出的對話要帶那個對話的 UUID，見下一段）；沿用相同的簽章、寄件者與目的會話檢查。這是後續訊息，不是重開一張相同工單。`note`／`result` 不會喚醒這個收件端。
+
+### 對 relay 開出的對話送後續訊息
+
+用 `--ref antigravity-session:new` 開出的對話，之後要停手、追問或修正，不必再另開新對話轉達：對那個對話的 UUID 寄 `reply`（或 `task`）。UUID 取自收件端 `app-delivery/<原信 ID>.json` 的 `conversation_id`。
+
+```powershell
+python -m agent_relay send --to antigravity --kind reply --reply-to <原信 ID> --ref antigravity-session:<該對話 UUID> --subject "停手：worktree 審查中，請勿再改" --body-file stop.md
+```
+
+sidecar 改用 `agentapi send-message <UUID>` 投遞，條件是：
+
+- UUID 等於設定檔綁定的會話，**或**出現在本機 `app-delivery/*.json` 的收據中，且該收據 `mode` 為 `new-conversation`、`status` 為 `notified`。從未開過的 UUID，以及收據為 `failed`／`refused`／`uncertain`／`attempting` 的 UUID，一律略過且不寫收據。
+- 其餘檢查全部照舊：有效簽章、`senders` 白名單、`max_age_hours` 期限、有帶 `--project` 時必須在 `repos` 內、不含 `dispatch`、同信只通知一次。`kind` 只限 `task`、`reply`。
+- UUID 須是小寫連字號寫法，且一封信只能帶一個 session ref。後續訊息的收據記為 `mode: follow-up`，不會成為授權其他 UUID 的依據。
+
+寄件端不會自動從原信推出 UUID：收據只存在收件端本機、不在共享 store，所以 `--ref` 由寄件端明確帶上。
 
 通知只含信件 ID 與固定收信指令，不把標題、內文或外部指令放進程序參數。通知不會替 Agent 把信搬成已讀或結案；這兩步由收件會話執行，回信須附實際證據。簽章證明來源，不保證工作內容安全；會話仍須遵守既有權限、範圍與人工確認要求。
 
@@ -105,7 +121,7 @@ python -m agent_relay send --to antigravity --kind task --project C:/GitHub/targ
 
 本機 `~/.agent-relay-antigravity/app-delivery/<信件 ID>.json` 保存通知收據：
 
-- `notified`：通知命令 exit 0；同信不再通知。
+- `notified`：通知命令 exit 0；同信不再通知。送往 relay 開出之對話的後續訊息，收據另有 `mode: follow-up`。
 - `failed`：命令非零；不自動重試，先讀 App sidecar 的錯誤紀錄。
 - `refused`：簽章驗證失敗，收據記錄原因；拒絕訊息只輸出一次，之後的輪次靜默略過。
 - `uncertain`／`attempting`：逾時或程序中斷，可能已送達。先看指定會話，**不要盲目重送**。
