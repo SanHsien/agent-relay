@@ -130,7 +130,10 @@ class ArgvTests(DispatchBase):
         for flag in ("--dangerously-skip-permissions", "bypassPermissions", "--dangerously-bypass-approvals-and-sandbox"):
             self.assertNotIn(flag, argv)
 
-    @unittest.skipUnless(Path("C:/GitHub/agent-cortex/paulsha_cortex").is_dir(), "agent-cortex not checked out")
+    @unittest.skipUnless(
+        dispatch._cortex_launcher({"dispatch": {"cortex_path": "C:/GitHub/agent-cortex"}}) is not None,
+        "agent-cortex not checked out or cannot be loaded",
+    )
     def test_cortex_builder_used_when_available(self):
         wt = self.worktree()
         cfg = {"dispatch": {"cortex_path": "C:/GitHub/agent-cortex"}}

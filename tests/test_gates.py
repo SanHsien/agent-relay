@@ -59,6 +59,28 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(gates.verify_command(Path("."), {"command": ["a", "b"]}), ["a", "b"])
         self.assertIsNone(gates.verify_command(Path("."), {}))
 
+    def test_parse_loop_policy_quick_gate_formats(self):
+        self.assertEqual(gates._parse_loop_policy_quick_gate('[verification]\nquick_gate = "echo 1"\n'), "echo 1")
+        self.assertEqual(gates._parse_loop_policy_quick_gate("[verification]\nquick_gate = 'echo 2'\n"), "echo 2")
+        self.assertEqual(gates._parse_loop_policy_quick_gate('[verification]\nquick_gate = ["python", "-m", "pytest"]\n'), ["python", "-m", "pytest"])
+        self.assertEqual(gates._parse_loop_policy_quick_gate('[verification]\nquick_gate = "echo \\"nested\\"" # inline\n'), 'echo "nested"')
+        self.assertIsNone(gates._parse_loop_policy_quick_gate('[verification]\nquick_gate = make check\n'))
+        self.assertIsNone(gates._parse_loop_policy_quick_gate('[other]\nquick_gate = "echo 1"\n'))
+        self.assertIsNone(gates._parse_loop_policy_quick_gate('[verification]\nfull_gate = "echo 1"\n'))
+
+    def test_parse_loop_policy_quick_gate_rejects_ambiguous_input(self):
+        parse = gates._parse_loop_policy_quick_gate
+        # a section header with a trailing comment still closes [verification]
+        self.assertIsNone(parse('[verification]\n[other] # note\nquick_gate = "evil"\n'))
+        # a line inside a multi-line string is not a key
+        self.assertIsNone(parse('[verification]\nnote = """\nquick_gate = "evil"\n"""\n'))
+        # trailing garbage after the quoted value
+        self.assertIsNone(parse('[verification]\nquick_gate = "echo ok" rm -rf\n'))
+        # a duplicate key is ambiguous
+        self.assertIsNone(parse('[verification]\nquick_gate = "a"\nquick_gate = "b"\n'))
+        # an unknown escape sequence is invalid TOML
+        self.assertIsNone(parse('[verification]\nquick_gate = "a\\qb"\n'))
+
     def test_auto_and_by_repo(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "demo"

@@ -25,6 +25,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -38,7 +39,10 @@ from . import procs
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
-    tomllib = None
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None
 
 TEST_GLOBS = ("tests/**", "test/**", "**/test_*.py", "**/*_test.py", "**/*.test.*", "**/*.spec.*", "features/**")
 # Files that decide what the test run does; a worker touching them can make green meaningless.
@@ -86,6 +90,41 @@ def detect_command(repo: Path) -> list[str] | None:
     return None
 
 
+_SECTION = re.compile(r'^\[\s*([A-Za-z0-9_.-]+)\s*\]\s*(?:#.*)?$')
+_QUICK_GATE = re.compile(r'''^quick_gate\s*=\s*("(?:[^"\x5c]|\x5c.)*"|'[^']*'|\[.*\])\s*(?:#.*)?$''')
+
+
+def _parse_loop_policy_quick_gate(text: str) -> str | list[str] | None:
+    """Strict subset of TOML; anything unsupported or ambiguous returns None."""
+    found = None
+    in_verification = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if '"""' in line or "'''" in line:
+            return None
+        if line.startswith("["):
+            section = _SECTION.match(line)
+            if section:
+                in_verification = section[1] == "verification"
+            elif line.startswith("[["):
+                in_verification = False
+            continue
+        if not in_verification or not re.match(r"quick_gate\s*=", line):
+            continue
+        match = _QUICK_GATE.match(line)
+        if match is None or found is not None:
+            return None
+        value = match[1]
+        if value.startswith("'"):
+            found = value[1:-1]
+            continue
+        try:
+            found = json.loads(value)
+        except ValueError:
+            return None
+    return found
+
+
 def verify_command(repo: Path, settings: dict) -> list[str] | None:
     """The command for this repo: verify.by_repo[<folder name>], else verify.command.
 
@@ -99,13 +138,18 @@ def verify_command(repo: Path, settings: dict) -> list[str] | None:
     if command == "auto":
         return detect_command(Path(repo))
     if command == "loop-policy":
-        if tomllib is None:
-            return None
         try:
-            policy = tomllib.loads((repo / "loop-policy.toml").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            raw = (repo / "loop-policy.toml").read_text(encoding="utf-8")
+        except OSError:
             return None
-        command = (policy.get("verification") or {}).get("quick_gate")
+        if tomllib is not None:
+            try:
+                policy = tomllib.loads(raw)
+            except (OSError, ValueError, TypeError):
+                return None
+            command = (policy.get("verification") or {}).get("quick_gate")
+        else:
+            command = _parse_loop_policy_quick_gate(raw)
     if isinstance(command, str) and command.strip():
         parts = shlex.split(command, posix=sys.platform != "win32")
         return [p[1:-1] if len(p) >= 2 and p[0] == p[-1] == '"' else p for p in parts]

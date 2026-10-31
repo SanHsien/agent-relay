@@ -9,11 +9,11 @@
 ## 近期：可以直接動手
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
-| `gc` 解析 `created_at` 在 Python 3.10 也接受非 3／6 位小數秒；CI 加跑 3.10 | `requires-python = ">=3.10"`，但 3.10 的 `datetime.fromisoformat` 只吃 3／6 位小數，CI 只跑 3.12 所以測不到 | 新測試餵 `2026-10-21T13:39:57.1Z` 等格式；CI 矩陣含 3.10 且綠 | Codex | `agent_relay/gc.py:119`；`pyproject.toml:5`；`.github/workflows/ci.yml`；解析修正與回歸測試已進 main（2026-10-29）；CI 尚未加 3.10，因為 3.10 全套有三項既有失敗：`tests/test_gates.py` 兩項（`agent_relay/gates.py` 的 `tomllib` 是 3.11+）與 `test_dispatch.ArgvTests.test_cortex_builder_used_when_available`，要先修好這三項才能加 3.10 並刪本列 |
 
 ## 中期：等條件成立再做
 | 項目 | 觸發條件 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
+| `agent_relay/dispatch.py:210` 的 `fromisoformat` 沒有小數正規化也沒 `try`，Python 3.10 下 `.1+00:00` 會丟 `ValueError` | 呼叫路徑確認會碰到（`max_age_hours` 檢查收到非 3／6 位小數秒的 `created_at`） | 新測試餵 `2026-10-21T13:39:57.1Z` 等格式，3.10 與 3.12 都通過；壞值走 `DispatchError` 而非未處理例外 | Claude Sonnet | `agent_relay/dispatch.py:210`；`agent_relay/dispatch.py:1373`（同樣寫法） |
 | 恢復 agy 工人，改走正式 API 計費 | 維護者改用 `GEMINI_API_KEY` 或 Vertex，且有不經個人訂閱 CLI 的呼叫方式 | 新 runtime 只讀環境變數中的 API 金鑰、不讀 App／CLI 登入狀態；測試涵蓋未設金鑰時拒絕；SPEC 與 README 同步 | Claude Sonnet | `agent_relay/dispatch.py:46` |
 | `advise` 的路由表跟上 agent-advisor 的 lane 定義 | agent-advisor 改了 lane（模型分層或判準）；判準由 agent-advisor 擁有，本 repo 只是消費者 | `ROUTES`／`HIGH_*`／`LOW_*` 與 agent-advisor 新版一致，docstring 註明對照的 agent-advisor commit；`tests` 綠 | Claude Sonnet | `agent_relay/advisor.py:1-15` |
 | `repo_id` 正規化 `ssh://git@host/x/y` 與 `git@host:x/y` 為同一 id | 實際出現兩台機器用不同 remote 寫法導致鎖或 claim 對不上 | 新測試：兩種寫法算出相同 id；舊 claim 的相容讀取有測試 | Claude Opus | `agent_relay/locks.py:120` |
