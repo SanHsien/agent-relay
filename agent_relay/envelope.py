@@ -81,7 +81,7 @@ def build(
         env["project"] = project
     if refs:
         env["refs"] = list(refs)
-    if sender_session:
+    if sender_session is not None:  # "" is a value, not "absent": validate() refuses it
         env["sender_session"] = sender_session
     if dispatch:
         env["dispatch"] = dispatch

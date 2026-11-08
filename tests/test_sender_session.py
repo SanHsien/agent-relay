@@ -23,8 +23,15 @@ def build(**kw):
 class EnvelopeFieldTests(unittest.TestCase):
     def test_absent_unless_given_so_old_mail_shape_is_unchanged(self):
         self.assertNotIn("sender_session", build())
-        self.assertNotIn("sender_session", build(sender_session=""))
         self.assertNotIn("sender_session", build(sender_session=None))
+
+    def test_empty_string_is_an_invalid_value_not_an_absent_one(self):
+        with self.assertRaises(envelope.EnvelopeError):
+            build(sender_session="")
+        env = build()
+        env["sender_session"] = ""
+        with self.assertRaises(envelope.EnvelopeError):
+            envelope.validate(env)
 
     def test_round_trips_through_storage_text(self):
         env = build(sender_session=UUID)
@@ -107,6 +114,14 @@ class SendTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("ignoring CLAUDE_CODE_SESSION_ID", err)
         self.assertNotIn("sender_session", self.stored())
+
+    def test_empty_explicit_flag_exits_2_writes_nothing_and_skips_the_environment_fallback(self):
+        for env in ({}, {"CLAUDE_CODE_SESSION_ID": UUID}):
+            with mock.patch.dict(os.environ, env):
+                code, _, err = self.send("--from-session", "")
+            self.assertEqual(code, 2)
+            self.assertIn("sender_session", err)
+            self.assertEqual(Store(str(self.store)).list("codex"), [])
 
     def test_bad_explicit_flag_fails_and_writes_nothing(self):
         code, _, err = self.send("--from-session", "line\nbreak")
