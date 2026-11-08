@@ -35,6 +35,7 @@ One message = one UTF-8 JSON file named `<id>.json`.
 | `host` | No | string | Sender hostname for diagnostics; cannot contain newlines |
 | `project` | No | string | Project directory on the receiver machine, or `asr:<session-name-or-id>` (resolved via the [agent-session-restore](https://github.com/SanHsien/agent-session-restore) registry). When `kind=task` and this field is set, the `handoff` doorbell drops a handoff card in that project |
 | `refs` | No | string[] | Related file paths or URLs |
+| `sender_session` | No | string | Identifier of the session that sent the mail (for example a Claude Code session id), so the commander's records can map a dispatch back to its session. 1 to 128 printable ASCII characters, no spaces or newlines, and nothing secret-shaped (API key, token): an identifier, never a credential. Set with `relay send --from-session <id>`; when absent, `CLAUDE_CODE_SESSION_ID` is used (an invalid value there is warned about and skipped without blocking the send; an invalid explicit flag refuses the send). Older mail without the field stays valid |
 
 Unrecognized fields must be preserved without raising an error so new fields can be added later. `refs` must be an array of strings; `subject`, `host`, and `project` must not contain newlines (they are written into handoff card frontmatter).
 
@@ -377,7 +378,7 @@ Receiver  relay trust <mailbox> <pubkey> ──▶ ~/.agent-relay/allowed_signer
           relay dispatch ──▶ ssh-keygen -Y verify -I <from> -n agent-relay; refuses if invalid
 ```
 
-- **What is signed**: all envelope fields except `sig`, serialized as UTF-8 JSON with sorted keys and no whitespace. `id`, `to`, `body`, and `dispatch` are all covered: tampering with the body, forwarding to another mailbox, or swapping the ID fails verification.
+- **What is signed**: all envelope fields except `sig`, serialized as UTF-8 JSON with sorted keys and no whitespace. `id`, `to`, `body`, and `dispatch` are all covered: tampering with the body, forwarding to another mailbox, or swapping the ID fails verification. Optional fields such as `sender_session` are signed whenever present, so adding, changing or removing one afterwards fails verification; older mail without the field verifies as before, and a verifier does not need to know the new field.
 - **Replay protection**: someone with push access to the store could move a signed, completed message from `done/` back to `new/`. The receiver checks its local `runs/<id>/state.json` (which is never stored in git) and refuses if already replied. In addition, any dispatch whose `created_at` is older than `dispatch.max_age_hours` (default 168 hours) is refused, bounding the replay window.
 - **Identity bound to mailbox**: the principal in `allowed_signers` is the mailbox name under namespace `agent-relay`. Trusting a key for `mallory` never allows it to sign as `commander`.
 - **Trust list stays local**: `allowed_signers` is never stored in the shared store (otherwise anyone who can push to the store could add their own key). Public keys are exchanged out-of-band—for example, by running `relay trust` on each machine.

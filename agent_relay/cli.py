@@ -195,6 +195,14 @@ def cmd_send(args, cfg) -> int:
         hit = store.find(sender, args.reply_to)
         if hit is not None:
             thread = envelope.loads(hit[1].read_text(encoding="utf-8")).get("thread")
+    session = args.from_session
+    if session is None and os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        session = os.environ["CLAUDE_CODE_SESSION_ID"].strip()
+        try:  # an environment fallback must never block a send; an explicit flag may
+            envelope.check_session(session)
+        except envelope.EnvelopeError as exc:
+            print(f"warning: ignoring CLAUDE_CODE_SESSION_ID ({exc})", file=sys.stderr)
+            session = None
     env = envelope.build(
         sender=sender,
         to=args.to,
@@ -207,6 +215,7 @@ def cmd_send(args, cfg) -> int:
         project=args.project,
         refs=args.ref,
         dispatch=_dispatch_spec(args),
+        sender_session=session,
     )
     key = signing.settings(cfg, config.home())[0]
     if key:
@@ -490,6 +499,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--thread", help="defaults to the original message's thread when replying")
     s.add_argument("--project", help="receiver-side project folder (enables the handoff doorbell)")
     s.add_argument("--ref", action="append", help="related path or URL; repeatable")
+    s.add_argument("--from-session", metavar="ID",
+                   help="id of the sending session, recorded as envelope field sender_session "
+                        "(default: $CLAUDE_CODE_SESSION_ID); 1-128 printable ASCII characters, no secrets")
     s.add_argument("--allow-unlisted-project", metavar="REASON",
                    help="--to antigravity only: send although --project is not an exact antigravity.repos entry "
                         "(the sidecar will still skip it); needs a reason, recorded in send-overrides.jsonl")

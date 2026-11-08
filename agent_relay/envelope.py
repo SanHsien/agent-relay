@@ -23,6 +23,7 @@ PRIORITIES = ("high", "normal", "low")
 AGENT_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9_-])?")
 ID_RE = re.compile(r"[0-9A-Za-z](?:[0-9A-Za-z._-]{0,126}[0-9A-Za-z_-])?")
 CREATED_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})")
+SESSION_RE = re.compile(r"[!-~]{1,128}")  # printable ASCII, no spaces, no newlines
 WINDOWS_RESERVED = re.compile(r"(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?")
 
 
@@ -57,6 +58,7 @@ def build(
     refs: list[str] | None = None,
     dispatch: dict | None = None,
     result: dict | None = None,
+    sender_session: str | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
     env_id = new_id(now)
@@ -79,12 +81,24 @@ def build(
         env["project"] = project
     if refs:
         env["refs"] = list(refs)
+    if sender_session:
+        env["sender_session"] = sender_session
     if dispatch:
         env["dispatch"] = dispatch
     if result:
         env["result"] = result
     validate(env)
     return env
+
+
+def check_session(value: object) -> None:
+    """sender_session is an identifier of the dispatching session, never a credential."""
+    if not isinstance(value, str) or not SESSION_RE.fullmatch(value):
+        raise EnvelopeError("sender_session must be 1-128 printable ASCII characters without spaces or newlines")
+    from .context import redact  # late import: context imports store, which imports this module
+
+    if redact(value) != value:
+        raise EnvelopeError("sender_session looks like a secret; it is an identifier, never a credential")
 
 
 def validate(env: dict) -> None:
@@ -112,6 +126,8 @@ def validate(env: dict) -> None:
     for key in ("subject", "host", "project"):
         if key in env and any(ch in str(env[key]) for ch in (chr(10), chr(13))):
             raise EnvelopeError(f"{key} must be one line")
+    if "sender_session" in env:
+        check_session(env["sender_session"])
     refs = env.get("refs", [])
     if not (isinstance(refs, list) and all(isinstance(r, str) for r in refs)):
         raise EnvelopeError("refs must be a list of strings")

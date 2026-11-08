@@ -35,6 +35,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `host` | 否 | string | 寄件機器名稱，查問題用，不可有換行 |
 | `project` | 否 | string | 收件端機器上的專案資料夾，或 `asr:<會話名或 id>`（從 [agent-session-restore](https://github.com/SanHsien/agent-session-restore) 的登記檔查路徑）。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
 | `refs` | 否 | string[] | 相關路徑或 URL |
+| `sender_session` | 否 | string | 寄出這封信的會話識別碼（例如 Claude Code 的 session id），讓指揮者的紀錄能對回是哪個會話派的工。1 至 128 個可見 ASCII 字元，不可有空白或換行，不可長得像機密（API key、token）；只放識別碼，不放憑證。`relay send --from-session <id>` 指定，沒指定時取環境變數 `CLAUDE_CODE_SESSION_ID`（該值不合法時警告並略過，不擋寄信；明確帶的旗標不合法則拒寄）。沒有這個欄位的舊信照常有效 |
 
 不認得的欄位要保留、不可報錯，方便日後加欄位。`refs` 必須是字串陣列；`subject`、`host`、`project` 不可含換行（它們會被寫進交接卡的 frontmatter）。
 
@@ -377,7 +378,7 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
         relay dispatch ──▶ ssh-keygen -Y verify -I <from> -n agent-relay；不過就 refused
 ```
 
-- **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。
+- **簽什麼**：信件所有欄位（`sig` 除外），key 排序、無空白、UTF-8 的 JSON。可選欄位（如 `sender_session`）有出現就一起被簽，事後新增、改掉或刪掉都會驗不過；沒有該欄位的舊信照舊驗得過，驗證端不需要認得新欄位。`id`、`to`、`body`、`dispatch` 都在簽章範圍內：改內容、轉寄給別的信箱、換 id 重放都會驗不過。
 - **原封不動的重放**：能推送 store 的人可以把已簽、已完成的信從 `done/` 搬回 `new/`。收件端看自己本機的 `runs/<id>/state.json`，裡面記錄為已回信就拒絕；這份紀錄不在 store 裡。另外，`created_at` 超過 `dispatch.max_age_hours`（預設 168 小時）的派工一律拒絕，用來限制舊信重放的時間窗。
 - **身分綁信箱**：allowed_signers 的 principal 是信箱名，namespace 限 `agent-relay`。某個金鑰被信任為 `mallory`，不代表它能替 `commander` 簽章。
 - **信任清單只在本機**：金鑰清單不放在 store。如果放在 store，能推送 store 的人就能把自己的金鑰加進去。公鑰交換走 store 以外的管道，例如維護者親手在兩台機器各執行一次 `relay trust`。
