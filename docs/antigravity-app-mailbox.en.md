@@ -88,8 +88,8 @@ Do not install a separate Windows Task Scheduler poller for this mailbox: the si
 python -m agent_relay send --to antigravity --kind task --project C:/GitHub/target-repo --subject "Single verification task" --body-file task.md
 ```
 
-You can also pass `--ref antigravity-session:<UUID>` to target the conversation bound on the receiver, or a conversation the sidecar itself opened (see "Sending follow-ups to a relay-opened conversation" below); if `--project` is also present, the project must match as well. Do not pass `--run`. When an existing message already carries the right session ref, reuse it directly—do not resend or mutate a signed envelope.
-If an external agent (such as Claude Code, Codex, or Hermes) wants to **open a brand-new top-level visible conversation (`nestingDepth: 0`) in the Antigravity Desktop left sidebar** to execute the task, pass `--ref antigravity-session:new --project C:/GitHub/target-repo` (must be `kind=task` with `--project` in the `repos` allowlist): the sidecar invokes `agentapi new-conversation --title="[Relay] <message-id>"` to create a top-level conversation and records the returned `conversationId` in `app-delivery/<message-id>.json`.
+You can also pass `--ref antigravity-session:<UUID>` to target the conversation bound on the receiver, or a conversation the sidecar itself opened (see "Sending follow-ups to a relay-opened conversation" below); if `--project` is also present, the project must match as well. Do not pass `--run`. `send --to antigravity` first reads the receiver's `antigravity.repos`: a `--project` that is not **exactly** one of its entries (a subdirectory does not count) is refused with exit code 10 and the closest entry is named, nothing is written; when the list cannot be read it warns loudly and sends anyway. Point it at the receiver home with the `AGENT_RELAY_ANTIGRAVITY_HOME` environment variable or `antigravity_home` in the sender's config (default `~/.agent-relay-antigravity`). When you really mean it, add `--allow-unlisted-project "<reason>"`. When an existing message already carries the right session ref, reuse it directly—do not resend or mutate a signed envelope.
+If an external agent (such as Claude Code, Codex, or Hermes) wants to **open a brand-new top-level visible conversation (`nestingDepth: 0`) in the Antigravity Desktop left sidebar** to execute the task, pass `--ref antigravity-session:new --project C:/GitHub/target-repo` (must be `kind=task` with `--project` in the `repos` allowlist): the sidecar invokes `agentapi new-conversation --title="[Relay] <last-6-of-message-id> <subject>"` to create a top-level conversation and records the returned `conversationId` in `app-delivery/<message-id>.json`.
 
 Follow-up feedback on the same task can use `--kind reply --reply-to <original-id>` with the same session ref or project (for a conversation opened via `new`, pass that conversation's UUID, see the next section); it goes through the same signature, sender, and target-conversation checks. This is a follow-up message, not a duplicate task. `note` and `result` messages do not wake this receiver.
 
@@ -137,3 +137,14 @@ python -m agent_relay.antigravity --home "$HOME/.agent-relay-antigravity" --once
 Each cycle also writes and pushes the `hosts/antigravity@<host>.json` heartbeat (at the interval defined in SPEC §16), so `relay status` on the commander shows `antigravity@<host>`; once the App closes and the sidecar stops, that heartbeat ages out. Any heartbeat push error is recorded in `heartbeat_error` in the output without affecting notifications.
 
 To disable the sidecar, set `sidecars.agent-relay.enabled` to `false` in `config.json`, keeping the mailbox, receipts, and keys intact for auditing.
+
+## 5. Closing out: archive the conversation
+
+Once the work has landed and the original mail is `done`, archive the conversation the sidecar opened so the Desktop sidebar does not pile up:
+
+```powershell
+python -m agent_relay archive --mail <mail ID or its last 6 characters>
+python -m agent_relay archive --conversation <conversation UUID>
+```
+
+It only calls the Language Server's conversation-management RPC `UpdateConversationAnnotations`, calls no model and sends no message; success is `archived:true` read back from `~/.gemini/antigravity/annotations/<UUID>.pbtxt`. The token is never printed or logged.

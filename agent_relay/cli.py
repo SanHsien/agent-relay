@@ -22,6 +22,7 @@ from . import accept as accepter
 from . import dispatch as dispatcher
 from .store import Store, StoreError
 from . import procs
+from . import antigravity_archive, antigravity_send
 
 
 def _out(args: argparse.Namespace, data, text: str) -> None:
@@ -169,6 +170,22 @@ def cmd_send(args, cfg) -> int:
     if args.body_file:
         body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
     sender = _agent(args, cfg, "sender")
+    reason = (args.allow_unlisted_project or "").strip() if args.allow_unlisted_project is not None else None
+    if reason is not None and len(reason) < antigravity_send.MIN_REASON:
+        print(f"error: --allow-unlisted-project needs a reason of at least {antigravity_send.MIN_REASON} characters",
+              file=sys.stderr)
+        return 10
+    verdict = {"status": "ok", "errors": [], "warnings": []}
+    if args.to == "antigravity":
+        verdict = antigravity_send.check(cfg, args.kind, args.project, args.ref, reason)
+        for warning in verdict["warnings"]:
+            print(warning, file=sys.stderr)
+        if verdict["status"] == "reject":
+            for error in verdict["errors"]:
+                print(f"error: {error}", file=sys.stderr)
+            return 10  # nothing was written; the sidecar would have skipped this mail silently
+    elif reason is not None:
+        print("warning: --allow-unlisted-project only applies to --to antigravity; ignored", file=sys.stderr)
     store = Store(cfg["store"])
     if not args.no_sync:
         gitsync.pull(Path(cfg["store"]))
@@ -198,6 +215,8 @@ def cmd_send(args, cfg) -> int:
         print("warning: no signing key (run `relay keygen`); receivers that require signatures will refuse this task",
               file=sys.stderr)
     path = store.deliver(env)
+    if verdict.get("override"):
+        _record_override(env, reason)
     try:
         _sync(args, cfg, f"relay: {env['from']} -> {env['to']} {env['id']}")
     except gitsync.SyncError as exc:
@@ -206,6 +225,36 @@ def cmd_send(args, cfg) -> int:
              f"queued {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
         return 3
     _out(args, {"id": env["id"], "path": str(path)}, f"sent {env['id']} -> {env['to']}")
+    return 0
+
+
+def _record_override(env: dict, reason: str | None) -> None:
+    """Audit line for a send that bypassed the Antigravity allow-list (never fails the send)."""
+    line = {"id": env["id"], "to": env["to"], "project": env.get("project"), "reason": reason,
+            "at": env["created_at"]}
+    try:
+        with (config.home() / "send-overrides.jsonl").open("a", encoding="utf-8") as out:
+            out.write(json.dumps(line, ensure_ascii=False) + chr(10))
+    except OSError as exc:
+        print(f"warning: could not record the override ({type(exc).__name__})", file=sys.stderr)
+
+
+def cmd_archive(args, cfg) -> int:
+    gemini = Path(args.gemini_dir).expanduser() if args.gemini_dir else antigravity_archive.gemini_dir()
+    log = Path(args.sidecar_log).expanduser() if args.sidecar_log else antigravity_archive.sidecar_log(gemini)
+    try:
+        conversation = args.conversation or antigravity_archive.resolve_mail(args.mail, log)
+        if args.conversation and not args.allow_foreign and not antigravity_archive.relay_opened(conversation, log):
+            raise antigravity_archive.ArchiveError(
+                f"{conversation} is not a conversation this relay opened (not in {log}); "
+                f"pass --allow-foreign to archive it anyway")
+        report = antigravity_archive.archive(conversation, gemini=gemini)
+    except antigravity_archive.ArchiveError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 11
+    after = report["after"]
+    _out(args, report, f"archived {conversation} (HTTP {report['http']}, annotation shows archived:true"
+                       f"{', timestamp refreshed' if report['timestamp_refreshed'] else ''}) title={after.get('title')!r}")
     return 0
 
 
@@ -441,6 +490,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--thread", help="defaults to the original message's thread when replying")
     s.add_argument("--project", help="receiver-side project folder (enables the handoff doorbell)")
     s.add_argument("--ref", action="append", help="related path or URL; repeatable")
+    s.add_argument("--allow-unlisted-project", metavar="REASON",
+                   help="--to antigravity only: send although --project is not an exact antigravity.repos entry "
+                        "(the sidecar will still skip it); needs a reason, recorded in send-overrides.jsonl")
     g = s.add_argument_group("dispatch (kind=task only): run this task in a fresh agent session")
     g.add_argument("--run", choices=(*dispatcher.RUNTIMES, "auto"),
                    help="runtime the receiver should start; auto = receiver picks by complexity and its quotas")
@@ -453,6 +505,16 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--tdd", action="store_true", help="require a test that fails before the change (red) and passes after")
     g.add_argument("--base", help="commit sha the worker starts from (receiver fetches origin if needed)")
     s.set_defaults(func=cmd_send)
+
+    s = sub.add_parser("archive", help="archive an Antigravity conversation the relay opened (SPEC section 20)")
+    target = s.add_mutually_exclusive_group(required=True)
+    target.add_argument("--conversation", help="conversation UUID")
+    target.add_argument("--mail", help="mail id (or its last 6+ characters); the conversation comes from sidecar.log")
+    s.add_argument("--allow-foreign", action="store_true",
+                   help="with --conversation: also archive a conversation the sidecar log does not list")
+    s.add_argument("--gemini-dir", help="Antigravity data folder (default ~/.gemini/antigravity)")
+    s.add_argument("--sidecar-log", help="sidecar.log path (default <gemini-dir>/sidecar_data/agent-relay/logs/sidecar.log)")
+    s.set_defaults(func=cmd_archive)
 
     s = sub.add_parser("advise", help="pick runtime/model for a task from its complexity and local quotas")
     s.add_argument("--subject", required=True)

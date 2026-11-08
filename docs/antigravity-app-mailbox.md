@@ -88,8 +88,8 @@ App 提供 sidecar 的 `ANTIGRAVITY_LS_ADDRESS` 與 `agentapi` 環境。一般 s
 python -m agent_relay send --to antigravity --kind task --project C:/GitHub/target-repo --subject "單項試驗" --body-file task.md
 ```
 
-也可用 `--ref antigravity-session:<UUID>` 指定已在收件端綁定的會話，或 sidecar 自己開出的對話（見下方「對 relay 開出的對話送後續訊息」）；若同時有 `--project`，專案也必須相符。不加 `--run`。既有信件已有正確 session ref 時直接沿用，不重寄、不修改簽過的信封。
-若外部 Agent（如 Claude Code、Codex、Hermes）希望在 **Antigravity Desktop 左側對話列表自動開一個全新的頂層可視對話**（`nestingDepth: 0`）來執行該工單，可帶 `--ref antigravity-session:new --project C:/GitHub/target-repo`（必須為 `kind=task` 且 `--project` 在 `repos` 白名單內）：sidecar 會呼叫 `agentapi new-conversation --title="[Relay] <信件ID>"` 建立頂層新會話，並將回傳的新 `conversationId` 記錄於 `app-delivery/<信件ID>.json`。
+也可用 `--ref antigravity-session:<UUID>` 指定已在收件端綁定的會話，或 sidecar 自己開出的對話（見下方「對 relay 開出的對話送後續訊息」）；若同時有 `--project`，專案也必須相符。不加 `--run`。`send --to antigravity` 會先讀收件端的 `antigravity.repos`：`--project` 與清單項目不**完全相同**（子目錄也不算）就以退出碼 10 拒絕並指出最接近的項目，不寫信；讀不到清單時大聲警告後照寄。收件端 home 用環境變數 `AGENT_RELAY_ANTIGRAVITY_HOME` 或寄件端 config 的 `antigravity_home` 指定（預設 `~/.agent-relay-antigravity`）。確實要寄時加 `--allow-unlisted-project "<理由>"`。既有信件已有正確 session ref 時直接沿用，不重寄、不修改簽過的信封。
+若外部 Agent（如 Claude Code、Codex、Hermes）希望在 **Antigravity Desktop 左側對話列表自動開一個全新的頂層可視對話**（`nestingDepth: 0`）來執行該工單，可帶 `--ref antigravity-session:new --project C:/GitHub/target-repo`（必須為 `kind=task` 且 `--project` 在 `repos` 白名單內）：sidecar 會呼叫 `agentapi new-conversation --title="[Relay] <信件ID末六碼> <主旨>"` 建立頂層新會話，並將回傳的新 `conversationId` 記錄於 `app-delivery/<信件ID>.json`。
 
 同一工單的修正意見可用 `--kind reply --reply-to <原信 ID>`，同樣加上 session ref 或 project（對 `new` 開出的對話要帶那個對話的 UUID，見下一段）；沿用相同的簽章、寄件者與目的會話檢查。這是後續訊息，不是重開一張相同工單。`note`／`result` 不會喚醒這個收件端。
 
@@ -137,3 +137,14 @@ python -m agent_relay.antigravity --home "$HOME/.agent-relay-antigravity" --once
 sidecar 每輪也會寫 `hosts/antigravity@<主機>.json` 心跳並推送（頻率見 SPEC §16），指揮者的 `relay status` 因此看得到 `antigravity@<主機>`；App 關閉、sidecar 停止後，該心跳會逾時。心跳推送失敗只在輸出的 `heartbeat_error` 記錄，不影響通知。
 
 停用只把 `config.json` 的 `sidecars.agent-relay.enabled` 改成 `false`，保留信箱、收據與金鑰供追查。
+
+## 5. 收尾：封存對話
+
+工作落地、原信 `done` 之後，把 sidecar 開出的對話封存，Desktop 側欄才不會堆積：
+
+```powershell
+python -m agent_relay archive --mail <信件 ID 或末 6 碼>
+python -m agent_relay archive --conversation <對話 UUID>
+```
+
+只呼叫 Language Server 的對話管理 RPC `UpdateConversationAnnotations`，不呼叫模型、不送訊息；成功與否以 `~/.gemini/antigravity/annotations/<UUID>.pbtxt` 讀回 `archived:true` 為準。權杖不會被印出或記錄。

@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +56,27 @@ def _repos(settings: dict) -> set[Path]:
     if not all(path.is_dir() for path in repos):
         raise ValueError('requires every configured repo to be an existing directory')
     return repos
+
+
+TITLE_SUBJECT_MAX = 48
+
+
+def short_id(mail_id: str) -> str:
+    """The last six characters of a mail id (the random suffix), enough to tell mails apart."""
+    return str(mail_id).rsplit('-', 1)[-1][-6:]
+
+
+def conversation_title(mail: dict) -> str:
+    """`[Relay] <short id> <subject>` for the Desktop sidebar. The subject is one line from a
+    signed, allow-listed sender; it still gets secret-shaped strings masked, control characters
+    dropped, whitespace collapsed and a length cap. It only ever travels as the value of the
+    single `--title=` argument, never as a separate argv element and never to a shell."""
+    subject = redact(str(mail.get('subject') or ''))
+    subject = ''.join(' ' if unicodedata.category(ch).startswith('C') else ch for ch in subject)
+    subject = ' '.join(subject.split())
+    if len(subject) > TITLE_SUBJECT_MAX:
+        subject = subject[:TITLE_SUBJECT_MAX - 1].rstrip() + '…'
+    return f"[Relay] {short_id(mail['id'])} {subject}".rstrip()
 
 
 def _canonical_uuid(value: object) -> str | None:
@@ -170,7 +192,7 @@ def _deliver(home: Path, *, sync: bool) -> dict:
         elif target_session != session:
             result['mode'] = 'follow-up'  # never 'new-conversation': it must not vouch for anything
         cmd = (
-            [*argv, 'new-conversation', f"--title=[Relay] {mail['id']}", notification]
+            [*argv, 'new-conversation', f"--title={conversation_title(mail)}", notification]
             if new_conv else
             [*argv, 'send-message', target_session, notification]
         )

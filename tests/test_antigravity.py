@@ -240,9 +240,10 @@ class AppDeliveryTests(unittest.TestCase):
         self.assertEqual(result['mode'], 'new-conversation')
         self.assertEqual(result['conversation_id'], spawned_uuid)
         argv = self.run.call_args.args[0]
-        self.assertEqual(argv[2:4], ['new-conversation', f"--title=[Relay] {mail['id']}"])
-        self.assertNotIn(mail['subject'], ' '.join(argv))
-        self.assertNotIn(mail['body'], ' '.join(argv))
+        self.assertEqual(argv[2:4], ['new-conversation', f"--title={antigravity.conversation_title(mail)}"])
+        self.assertEqual(argv[3], f"--title=[Relay] {mail['id'][-6:]} untrusted & title")
+        self.assertEqual(len([a for a in argv if mail['subject'] in a]), 1)  # only inside --title=
+        self.assertNotIn(mail['body'], ' '.join(argv))  # the body never reaches argv
 
     def test_new_conversation_ref_requires_task_and_listed_project(self):
         self.mail(refs=['antigravity-session:new'])
@@ -250,6 +251,48 @@ class AppDeliveryTests(unittest.TestCase):
         self.mail(refs=['antigravity-session:new'], project=str(self.home / 'unlisted'))
         self.assertEqual(self.deliver()['status'], 'idle')
         self.run.assert_not_called()
+
+
+class ConversationTitleTests(unittest.TestCase):
+    """The Desktop sidebar title: `[Relay] <short id> <subject>`."""
+
+    def title(self, subject, mail_id='20261107T192645949Z-c2e317'):
+        return antigravity.conversation_title({'id': mail_id, 'subject': subject})
+
+    def test_title_carries_short_id_and_subject(self):
+        self.assertEqual(self.title('review the fork credit audit'), '[Relay] c2e317 review the fork credit audit')
+
+    def test_long_subject_is_truncated_with_an_ellipsis_within_the_cap(self):
+        title = self.title('word ' * 40)
+        subject = title.removeprefix('[Relay] c2e317 ')
+        self.assertLessEqual(len(subject), antigravity.TITLE_SUBJECT_MAX)
+        self.assertTrue(subject.endswith('\u2026'))
+
+    def test_subject_of_exactly_the_cap_is_kept_whole(self):
+        subject = 'a' * antigravity.TITLE_SUBJECT_MAX
+        self.assertEqual(self.title(subject), f'[Relay] c2e317 {subject}')
+
+    def test_control_characters_and_whitespace_are_flattened_to_one_line(self):
+        title = self.title('line one\r\nline\ttwo\x00\x1b[31m   three')
+        self.assertNotRegex(title, r'[\x00-\x1f]')
+        self.assertEqual(title, '[Relay] c2e317 line one line two [31m three')
+
+    def test_secret_shaped_subject_is_masked(self):
+        title = self.title('deploy with token=sk-abcdefghijklmnopqrstuvwxyz0123456789')
+        self.assertNotIn('abcdefghijklmnop', title)
+        self.assertIn('[REDACTED]', title)
+
+    def test_missing_or_blank_subject_still_gives_a_title_with_the_id(self):
+        self.assertEqual(self.title(''), '[Relay] c2e317')
+        self.assertEqual(antigravity.conversation_title({'id': '20261107T192645949Z-c2e317'}), '[Relay] c2e317')
+
+    def test_cjk_subject_survives_and_never_becomes_a_question_mark(self):
+        title = self.title('審查艦隊授權稽核')
+        self.assertEqual(title, '[Relay] c2e317 審查艦隊授權稽核')
+        self.assertNotIn('?', title)
+
+    def test_id_without_a_dash_uses_its_last_six_characters(self):
+        self.assertEqual(antigravity.short_id('abcdefghij'), 'efghij')
 
 
 class RelayOpenedConversationFollowupTests(unittest.TestCase):
@@ -413,7 +456,8 @@ class RelayOpenedConversationFollowupTests(unittest.TestCase):
         self.run.return_value = mock.Mock(returncode=0, stdout=json.dumps(
             {'response': {'newConversation': {'conversationId': self.spawned}}}))
         self.assertEqual(self.deliver()['mode'], 'new-conversation')
-        self.assertEqual(self.run.call_args.args[0][2:4], ['new-conversation', f"--title=[Relay] {mail['id']}"])
+        self.assertEqual(self.run.call_args.args[0][2:4],
+                         ['new-conversation', f"--title={antigravity.conversation_title(mail)}"])
 
     def test_end_to_end_open_then_stop_follow_up(self):
         first = self.mail(kind='task', refs=['antigravity-session:new'], project=str(self.repo))
