@@ -1,6 +1,7 @@
 """`archive` talks to the LS conversation-management RPC; a fake LS stands in for it here."""
 
 import contextlib
+import http.client
 import http.server
 import io
 import json
@@ -117,7 +118,7 @@ class ArchiveTests(unittest.TestCase):
     def test_archive_by_mail_resolves_full_and_short_ids_from_the_sidecar_log(self):
         ls = self.fake()
         for ref in (MAIL, 'c2e317'):
-            code, out, err = self.run_cli('--mail', ref)
+            code, out, err = self.run_cli('--mail=' + ref)
             self.assertEqual(code, 0, err)
             self.assertIn(CONV, out)
         self.assertEqual({r['body']['cascadeIds'][0] for r in ls.requests}, {CONV})
@@ -125,7 +126,7 @@ class ArchiveTests(unittest.TestCase):
     def test_mail_that_opened_nothing_or_failed_is_refused_without_calling_the_ls(self):
         ls = self.fake()
         for ref in ('541831', 'ffffff', '20261107T202928110Z-541831', 'x-follow'):
-            code, _, err = self.run_cli('--mail', ref)
+            code, _, err = self.run_cli('--mail=' + ref)
             self.assertEqual(code, 11, ref)
             self.assertIn('opened no conversation', err)
         self.assertEqual(ls.requests, [])
@@ -134,6 +135,47 @@ class ArchiveTests(unittest.TestCase):
         ls = self.fake()
         code, _, err = self.run_cli('--mail', '17')
         self.assertEqual(code, 11)
+        self.assertEqual(ls.requests, [])
+
+    def add_log_line(self, mail_id, conversation):
+        log = self.gemini / 'sidecar_data' / 'agent-relay' / 'logs' / 'sidecar.log'
+        with log.open('a', encoding='utf-8') as out:
+            out.write(json.dumps({'id': mail_id, 'conversation_id': conversation, 'mode': 'new-conversation',
+                                  'status': 'notified', 'exit': 0}) + chr(10))
+
+    def test_suffix_matching_two_mails_is_ambiguous_and_never_reaches_the_ls(self):
+        ls = self.fake()
+        self.add_log_line('20261108T000000000Z-c2e317', OTHER)  # same last 6 characters, another mail
+        for ref in ('c2e317', 'Z-c2e317'[-7:], '-c2e317'):
+            code, _, err = self.run_cli('--mail=' + ref)
+            self.assertEqual(code, 11, ref)
+            self.assertIn('ambiguous', err)
+        self.assertEqual(ls.requests, [])
+
+    def test_longer_suffixes_disambiguate_and_the_full_id_always_works(self):
+        ls = self.fake()
+        self.add_log_line('20261108T000000000Z-c2e317', OTHER)
+        for ref, expected in (('9Z-c2e317', CONV), ('0Z-c2e317', OTHER), (MAIL, CONV),
+                              ('T192645949Z-c2e317', CONV)):
+            ls.requests.clear()
+            self.annotation.write_text('title:"x" archived:false', encoding='utf-8')
+            (self.gemini / 'annotations' / f'{OTHER}.pbtxt').write_text('title:"x" archived:false', encoding='utf-8')
+            code, _, err = self.run_cli('--mail=' + ref)
+            self.assertEqual(code, 0, f'{ref}: {err}')
+            self.assertEqual(ls.requests[0]['body']['cascadeIds'], [expected], ref)
+
+    def test_seven_plus_character_suffix_with_the_dash_matches_a_single_mail(self):
+        ls = self.fake()
+        for ref in ('Z-c2e317', '-c2e317', '645949Z-c2e317'):
+            code, _, err = self.run_cli('--mail=' + ref)
+            self.assertEqual(code, 0, f'{ref}: {err}')
+        self.assertEqual({r['body']['cascadeIds'][0] for r in ls.requests}, {CONV})
+
+    def test_suffix_shorter_than_six_never_matches_even_when_unique(self):
+        ls = self.fake()
+        for ref in ('2e317', '317', '7'):
+            code, _, err = self.run_cli('--mail=' + ref)
+            self.assertEqual(code, 11, ref)
         self.assertEqual(ls.requests, [])
 
     def test_conversation_the_relay_did_not_open_needs_allow_foreign(self):
@@ -160,6 +202,31 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(code, 11)
         self.assertIn('HTTP 403', err)
         self.assertNotIn(SECRET, out + err)
+
+    def test_token_with_crlf_never_reaches_output_and_the_exit_code_is_11(self):
+        ls = FakeLS(self.gemini)
+        self.addCleanup(ls.close)
+        bad = SECRET + chr(13) + chr(10) + 'X-Injected: 1'
+        with mock.patch.dict(os.environ, {'ANTIGRAVITY_LS_ADDRESS': f'127.0.0.1:{ls.port}',
+                                          'ANTIGRAVITY_CSRF_TOKEN': bad}):
+            code, out, err = self.run_cli('--mail', 'c2e317')
+        self.assertEqual(code, 11)
+        self.assertNotIn(SECRET, out + err)
+        self.assertNotIn('Injected', out + err)
+        self.assertNotIn('Traceback', err)
+        self.assertEqual(ls.requests, [])
+        self.assertIn('ValueError', err)
+
+    def test_other_transport_exceptions_become_errors_that_carry_only_the_type_name(self):
+        self.fake()
+        for exc in (http.client.BadStatusLine(SECRET), http.client.IncompleteRead(SECRET.encode()),
+                    ValueError('Invalid header value ' + SECRET)):
+            with mock.patch.object(arch.urllib.request, 'urlopen', side_effect=exc):
+                code, out, err = self.run_cli('--mail', 'c2e317')
+            self.assertEqual(code, 11, repr(exc))
+            self.assertNotIn(SECRET, out + err)
+            self.assertIn(type(exc).__name__, err)
+            self.assertNotIn('Traceback', err)
 
     def test_http_200_without_an_archived_annotation_is_a_failure_not_success(self):
         self.fake(rewrite=False)

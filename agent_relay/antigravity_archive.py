@@ -18,6 +18,7 @@ Read-back: ~/.gemini/antigravity/annotations/<id>.pbtxt must show `archived:true
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -33,6 +34,9 @@ from .context import redact
 
 RPC = '/exa.language_server_pb.LanguageServerService/UpdateConversationAnnotations'
 DEFAULT_SIDECAR_LOG = Path('sidecar_data') / 'agent-relay' / 'logs' / 'sidecar.log'
+
+
+MIN_SUFFIX = 6  # a mail id may be given as any suffix of at least this many characters
 
 
 class ArchiveError(Exception):
@@ -75,7 +79,7 @@ def resolve_mail(mail: str, log: Path) -> str:
     except OSError as exc:
         raise ArchiveError(f"cannot read the sidecar log {log} ({type(exc).__name__})") from None
     hits = {r['id']: r['conversation_id'] for r in rows
-            if r['id'] == mail or (len(mail) >= 6 and r['id'].endswith('-' + mail))}
+            if r['id'] == mail or (len(mail) >= MIN_SUFFIX and r['id'].endswith(mail))}
     if not hits:
         raise ArchiveError(f"mail {mail!r} opened no conversation according to {log} "
                            f"(needs a mode=new-conversation, status=notified line)")
@@ -132,10 +136,11 @@ def _post(base: str, token: str, conversation: str) -> int:
     stamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     body = {'cascadeIds': [conversation], 'mergeAnnotations': True,
             'annotations': {'archived': True, 'archivalStatusTimestamp': stamp}}
-    req = urllib.request.Request(
-        base + RPC, data=json.dumps(body).encode('utf-8'), method='POST',
-        headers={'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', 'x-codeium-csrf-token': token})
     try:
+        req = urllib.request.Request(
+            base + RPC, data=json.dumps(body).encode('utf-8'), method='POST',
+            headers={'Content-Type': 'application/json', 'Connect-Protocol-Version': '1',
+                     'x-codeium-csrf-token': token})
         with urllib.request.urlopen(req, timeout=20) as resp:
             resp.read(4096)
             return resp.status
@@ -144,6 +149,10 @@ def _post(base: str, token: str, conversation: str) -> int:
         raise ArchiveError(f"LS answered HTTP {exc.code}: {detail}") from None
     except (urllib.error.URLError, OSError) as exc:
         raise ArchiveError(f"LS at {base} unreachable ({type(exc.reason if hasattr(exc, 'reason') else exc).__name__})") from None
+    except (ValueError, http.client.HTTPException) as exc:
+        # http.client rejects a header value with CR/LF by raising ValueError whose message quotes
+        # the value, i.e. the token. Only the exception type may leave this function.
+        raise ArchiveError(f"LS request failed ({type(exc).__name__})") from None
 
 
 def archive(conversation: str, *, gemini: Path | None = None, wait: float = 10.0,

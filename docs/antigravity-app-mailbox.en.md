@@ -143,7 +143,7 @@ To disable the sidecar, set `sidecars.agent-relay.enabled` to `false` in `config
 Once the work has landed and the original mail is `done`, archive the conversation the sidecar opened so the Desktop sidebar does not pile up:
 
 ```powershell
-python -m agent_relay archive --mail <mail ID or its last 6 characters>
+python -m agent_relay archive --mail <full mail ID, or a suffix of at least 6 characters>
 python -m agent_relay archive --conversation <conversation UUID>
 ```
 

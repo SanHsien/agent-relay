@@ -3,7 +3,8 @@ open a new top-level Desktop conversation when mail carries `antigravity-session
 send follow-ups to conversations this sidecar itself opened (`antigravity-session:<uuid>`).
 
 Uses the App's agentapi, not agy CLI's separate conversation store. Only message
-IDs and fixed relay commands enter the notification; mail text is never argv.
+IDs and fixed relay commands enter the notification; the mail body is never argv. The subject
+reaches argv only as the value of the single `--title=` argument (see conversation_title).
 """
 
 from __future__ import annotations

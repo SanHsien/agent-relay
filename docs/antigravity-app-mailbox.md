@@ -143,7 +143,7 @@ sidecar 每輪也會寫 `hosts/antigravity@<主機>.json` 心跳並推送（頻�
 工作落地、原信 `done` 之後，把 sidecar 開出的對話封存，Desktop 側欄才不會堆積：
 
 ```powershell
-python -m agent_relay archive --mail <信件 ID 或末 6 碼>
+python -m agent_relay archive --mail <完整信件 ID，或至少 6 個字元的結尾後綴>
 python -m agent_relay archive --conversation <對話 UUID>
 ```
 

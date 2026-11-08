@@ -521,7 +521,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("archive", help="archive an Antigravity conversation the relay opened (SPEC section 20)")
     target = s.add_mutually_exclusive_group(required=True)
     target.add_argument("--conversation", help="conversation UUID")
-    target.add_argument("--mail", help="mail id (or its last 6+ characters); the conversation comes from sidecar.log")
+    target.add_argument("--mail", help="full mail id, or a suffix of it of at least 6 characters (c2e317, Z-c2e317); the conversation comes from sidecar.log")
     s.add_argument("--allow-foreign", action="store_true",
                    help="with --conversation: also archive a conversation the sidecar log does not list")
     s.add_argument("--gemini-dir", help="Antigravity data folder (default ~/.gemini/antigravity)")
