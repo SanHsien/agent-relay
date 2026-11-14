@@ -57,20 +57,51 @@
 
 只支援每批共同 `--choice`／`--note`；不同答案分次執行。單題 JSON 維持原物件，多題用 `answers` 陣列。整批預檢保證驗證失敗零寄送／零結案；不提供磁碟、簽章或同步失敗的交易回滾。`read` 原本已有 deadline 顯示，本次新增對應 assertion 並以 mutation 證明它會偵測顯示遭移除。
 
-## 完整交付檢查與阻礙
+## 沙盒內中間紀錄（taskkill 被拒）
 
 `python -m unittest discover -s tests -q`：`Ran 481 tests in 413.105s`、`FAILED (failures=1, errors=14)`，exit 1。原始完整輸出保存在本機暫存目錄的 `relay-ask-fix-full-tests.log`。
 
-- 11 個簽章 errors：實際 `whoami` 是 `CodexSandboxOnline`，但程序的 `USERNAME=SanHsien`；原始版本代表測試 `tests.test_signing.SigningTests.test_valid_signature_survives_storage` 也得到相同 `SigningError: Bad permissions`（exit 1）。僅在測試程序以 `$env:USERNAME=whoami` 對齊身分後，該案例通過（1 test，exit 0）。
+- 11 個簽章 errors：實際 `whoami` 是 `<sandbox-user>`，但程序的 `USERNAME=<user>`；原始版本代表測試 `tests.test_signing.SigningTests.test_valid_signature_survives_storage` 也得到相同 `SigningError: Bad permissions`（exit 1）。僅在測試程序以 `$env:USERNAME=whoami` 對齊身分後，該案例通過（1 test，exit 0）。
 - 3 個 timeout cleanup errors 及 1 個 assertion failure：`test_dispatch.RunTests.test_timeout_kills_worker`、`test_gates.GateReviewTests.test_timeout_kills_grandchildren_quickly`、`test_robustness.RunStdinTests.test_worker_that_never_reads_stdin_still_times_out`。最後一個同時有 failure 與 cleanup error。對本輪新建的單一測試子程序執行 `taskkill /T /F /PID <pid>` 回 exit 1、`ERROR: Access denied`；測試子程序已由持有的 Popen 物件 terminate 並 wait 清理。
 - `dispatch.py`、`gates.py`、`procs.py`、`signing.py` 與 HEAD 完全一致。沒有為通過這台機器而修改它們、跳過測試或放寬 timeout。
 
-因全套未綠，本輪不 stage、不 commit、不 push。後續工作只登記在 ROADMAP；不能把本次聚焦驗證當成完整交付通過。
+當時沙盒內全套未綠，故該中間階段未 stage／commit／push；此限制已由下列整合者沙盒外驗收補足，不代表目前仍未提交。
 
-最終補驗：
+當時沙盒內補驗：
 
 - `$env:USERNAME=whoami; python -m unittest tests.test_dispatch.SenderTrustTests tests.test_sender_session.SignatureTests tests.test_setup.SetupLocalTests.test_builds_everything_and_both_sides_trust_each_other tests.test_signing.SigningTests -q`：`Ran 15 tests in 9.090s`、`OK`，exit 0。僅重跑受影響的簽章群組，不重跑已通過的全套其他案例。
 - `python tools/check_doc_parity.py`：`PASS: bilingual document parity check passed (5 pairs)`，exit 0。
 - `python tools/check_links.py`：`31 Markdown files checked, 0 with broken links.`，exit 0。
 - `git diff --check`：無輸出，exit 0。
 - `git status --porcelain`：8 個 modified、2 個 untracked（本證據檔與 mutation 工具）；沒有 staged 檔案。HEAD 仍為 `2044f9bdeed9d04291a80a04097959f5986667ec`，沒有新 commit。
+
+## 整合者沙盒外驗收（2026-11-15）
+
+來源：本次第二輪任務指示中的整合者回報，非本沙盒重新執行的結果。整合者已提交 `88addb6`：
+
+- Python 3.14 與 Python 3.11：各 481 tests OK。
+- doc parity：PASS。
+- links：0 broken。
+- mutation：21/21 killed。
+
+## 第二輪小修（2026-11-15）
+
+- `--note` 原先接受換行並可偽造 `選擇：` 行；現在於 strip 前拒絕 LF／CR（含前後端換行），回 2，整批信件內容與狀態不變。
+- 選項代號原先接受零寬／不可見格式字元；現在拒絕 Unicode `Cf`，測試涵蓋 8 種字元的單獨代號與尾綴代號。
+- 原 mutation 測試未涵蓋 allowed-project 下把 question 當 task 檢查，以及只移除 ID 比對的情況；新增兩個獨立案例與 mutation，另涵蓋上述 note／Cf 防護。
+- 中英 SPEC 同步規則與 `2044f9b` 舊 options 格式升級限制；ROADMAP 移除已完成的交付驗收列。
+- Red：新增案例對修前程式執行 `python -m unittest tests.test_questions -q`，29 tests、21 failures，exit 1（5 個 note 案例與 16 個 Cf 案例）；兩個既有防護案例在正確程式上通過，再由 mutation 證明移除防護會失敗。
+
+本輪沙盒內檢查（Python 3.14）：
+
+| 指令 | 實際輸出摘要 | Exit |
+| --- | --- | --- |
+| `python -m unittest tests.test_questions` | `Ran 29 tests in 1.575s`、`OK` | 0 |
+| `python tools/check_question_mutations.py` | `Mutation checks: 25/25 killed; temporary sources restored` | 0 |
+| `python tools/check_doc_parity.py` | `PASS: bilingual document parity check passed (5 pairs)` | 0 |
+| `python tools/check_links.py` | `31 Markdown files checked, 0 with broken links.` | 0 |
+| `git diff --check` | 無輸出 | 0 |
+
+依第二輪任務授權，本輪僅執行上述檢查，全套留由整合者沙盒外補跑；未宣稱本輪全套通過。無 push，未操作真實信箱，也未修改 canonical repo。
+
+提交阻礙：四項檢查通過後嘗試 `git add -- <本輪 8 個改動檔>`，exit 128，錯誤為 `Unable to create .git/index.lock: Permission denied`。環境設定將此工作樹的 `.git` 限為唯讀，且 approval policy 為 never，無法提權。故本輪未 stage／commit，HEAD 保持 `88addb6`，8 個檔案均為 unstaged modified；需由整合者提交。

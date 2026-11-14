@@ -342,7 +342,10 @@ def cmd_ask(args, cfg) -> int:
 
 def cmd_answer(args, cfg) -> int:
     choice = args.choice
-    note = (args.note or "").strip()
+    note = args.note or ""
+    if "\n" in note or "\r" in note:
+        raise envelope.EnvelopeError("--note must be a single-line string")
+    note = note.strip()
     if not choice and not note:
         raise envelope.EnvelopeError("answer needs --choice and/or --note")
     if len(set(args.id)) != len(args.id):

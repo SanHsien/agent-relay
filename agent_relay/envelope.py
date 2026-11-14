@@ -10,6 +10,7 @@ import json
 import re
 import secrets
 import socket
+import unicodedata
 from datetime import datetime, timezone
 
 SCHEMA = "agent-relay/envelope@1"
@@ -110,6 +111,8 @@ def _validate_question(q: object) -> None:
             code, sep, description = opt.partition("=")
             if not sep or not code or any(ch.isspace() for ch in code) or not description.strip():
                 raise EnvelopeError("each option must be code=description with a nonblank code and description")
+            if any(unicodedata.category(ch) == "Cf" for ch in code):
+                raise EnvelopeError("question option codes must not contain Unicode format characters")
             if code in codes:
                 raise EnvelopeError("question option codes must be unique")
             codes.add(code)

@@ -17,6 +17,14 @@ C = "tests.test_questions.CliQuestionWorkflowTests."
 
 # (name, file, exact source, replacement, focused regression)
 MUTANTS = [
+    ("ask question kind", CLI, 'checked = _send_allowlist(args, cfg, "question")',
+     'checked = _send_allowlist(args, cfg, "task")', C + "test_ask_rejects_new_session_ref_with_allowed_project"),
+    ("message id half-check", CLI, 'if orig["id"] != env_id or orig["to"] != agent:',
+     'if orig["to"] != agent:', C + "test_answer_rejects_mismatched_message_id"),
+    ("single-line note", CLI, 'if "\\n" in note or "\\r" in note:',
+     'if False:', C + "test_answer_rejects_multiline_note"),
+    ("format characters", ENV, 'if any(unicodedata.category(ch) == "Cf" for ch in code):',
+     'if False:', E + "test_option_codes_reject_format_characters"),
     ("known fields", ENV, 'if set(q) - {"options", "recommend", "deadline"}:',
      "if False:", E + "test_unknown_question_fields"),
     ("two options", ENV, "len(opts) < 2", "len(opts) < 1", E + "test_options_require_two_entries"),

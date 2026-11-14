@@ -99,6 +99,12 @@ class EnvelopeQuestionTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.check_bad_question({"options": [value, "B=no"]})
 
+    def test_option_codes_reject_format_characters(self):
+        for char in ("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff", "\u00ad", "\u202e", "\U000e0001"):
+            for code in (char, "A" + char):
+                with self.subTest(code=code):
+                    self.check_bad_question({"options": [code + "=yes", "B=no"]})
+
     def test_unknown_question_fields(self):
         self.check_bad_question({"options": ["A=yes", "B=no"], "extra": True})
 
@@ -231,6 +237,20 @@ class CliQuestionWorkflowTests(unittest.TestCase):
             with self.subTest(choice=choice):
                 self.assert_rejected(["answer", qid, "--choice", choice, "--note", "hello"])
 
+    def test_answer_rejects_multiline_note(self):
+        for note in ("ok\n選擇：B", "ok\r選擇：B", "ok\r\n選擇：B", "\nok", "ok\r"):
+            with self.subTest(note=note):
+                ids = [self.send_message(), self.send_message()]
+                self.assert_rejected(["answer", *ids, "--choice", "A", "--note", note])
+
+    def test_answer_rejects_mismatched_message_id(self):
+        ids = [self.send_message(), self.send_message()]
+        path = Store(self.store_dir).find("commander", ids[1])[1]
+        env = json.loads(path.read_text(encoding="utf-8"))
+        env["id"] = ids[0]  # Valid envelope ID, wrong filename; recipient stays correct.
+        path.write_text(json.dumps(env), encoding="utf-8")
+        self.assert_rejected(["answer", *ids, "--choice", "A"])
+
     def test_answer_rejects_choice_without_options(self):
         self.assert_rejected(["answer", self.send_message(options=False), "--choice", "A"])
 
@@ -336,6 +356,21 @@ class CliQuestionWorkflowTests(unittest.TestCase):
             audit = json.loads((self.worker_home / "send-overrides.jsonl").read_text(encoding="utf-8"))
             self.assertEqual(audit["id"], json.loads(out)["id"])
             self.assertEqual(audit["reason"], "intentional test override")
+
+    def test_ask_rejects_new_session_ref_with_allowed_project(self):
+        root = Path(self._tmp.name)
+        receiver = root / "receiver"
+        receiver.mkdir()
+        project = root / "allowed"
+        project.mkdir()
+        (receiver / "config.json").write_text(
+            json.dumps({"antigravity": {"repos": [str(project)]}}), encoding="utf-8")
+        before = self.snapshot()
+        with patch.dict("os.environ", {"AGENT_RELAY_ANTIGRAVITY_HOME": str(receiver)}):
+            rc, _ = _run_cli(self.worker_home, ["ask", "--to", "antigravity", "--subject", "Q",
+                "--project", str(project), "--ref", "antigravity-session:new", "--no-sync"])
+        self.assertEqual(rc, 10)
+        self.assertEqual(before, self.snapshot())
 
     def test_ask_rejects_new_session_ref_for_question(self):
         before = self.snapshot()
