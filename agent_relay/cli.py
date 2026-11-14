@@ -242,25 +242,34 @@ def _deliver_envelope(
     return 0, env, path
 
 
-def cmd_send(args, cfg) -> int:
-    body = _read_body(args)
-    sender = _agent(args, cfg, "sender")
+def _send_allowlist(args, cfg, kind):
+    """Shared send/ask guard; None means reject without writing mail."""
     reason = (args.allow_unlisted_project or "").strip() if args.allow_unlisted_project is not None else None
     if reason is not None and len(reason) < antigravity_send.MIN_REASON:
         print(f"error: --allow-unlisted-project needs a reason of at least {antigravity_send.MIN_REASON} characters",
               file=sys.stderr)
-        return 10
+        return None
     verdict = {"status": "ok", "errors": [], "warnings": []}
     if args.to == "antigravity":
-        verdict = antigravity_send.check(cfg, args.kind, args.project, args.ref, reason)
+        verdict = antigravity_send.check(cfg, kind, args.project, args.ref, reason)
         for warning in verdict["warnings"]:
             print(warning, file=sys.stderr)
         if verdict["status"] == "reject":
             for error in verdict["errors"]:
                 print(f"error: {error}", file=sys.stderr)
-            return 10  # nothing was written; the sidecar would have skipped this mail silently
+            return None
     elif reason is not None:
         print("warning: --allow-unlisted-project only applies to --to antigravity; ignored", file=sys.stderr)
+    return verdict, reason
+
+
+def cmd_send(args, cfg) -> int:
+    body = _read_body(args)
+    sender = _agent(args, cfg, "sender")
+    checked = _send_allowlist(args, cfg, args.kind)
+    if checked is None:
+        return 10
+    verdict, reason = checked
     _, env, path = _deliver_envelope(
         args,
         cfg,
@@ -291,6 +300,10 @@ def cmd_send(args, cfg) -> int:
 
 
 def cmd_ask(args, cfg) -> int:
+    checked = _send_allowlist(args, cfg, "question")
+    if checked is None:
+        return 10
+    verdict, reason = checked
     sender = _agent(args, cfg, "sender")
     question: dict = {}
     if args.option:
@@ -314,6 +327,8 @@ def cmd_ask(args, cfg) -> int:
         refs=args.ref,
         question=question or None,
         session=_resolve_session(args.from_session),
+        override_verdict=verdict,
+        override_reason=reason,
     )
     try:
         _sync(args, cfg, f"relay: {env['from']} asks {env['to']} {env['id']}")
@@ -326,44 +341,61 @@ def cmd_ask(args, cfg) -> int:
 
 
 def cmd_answer(args, cfg) -> int:
-    choice = (args.choice or "").strip()
+    choice = args.choice
     note = (args.note or "").strip()
     if not choice and not note:
-        raise SystemExit("error: answer needs --choice and/or --note")
-    agent = _agent(args, cfg)
+        raise envelope.EnvelopeError("answer needs --choice and/or --note")
+    if len(set(args.id)) != len(args.id):
+        raise envelope.EnvelopeError("duplicate question ids")
+    agent = args.agent or cfg.get("agent")
+    if not agent:
+        raise envelope.EnvelopeError("answer needs --agent or a configured agent")
     store = Store(cfg["store"])
     if not args.no_sync:
         gitsync.pull(Path(cfg["store"]))
-    orig = store.read(agent, args.id)
-    lines = []
-    if choice:
-        lines.append(f"選擇：{choice}")
-    if note:
-        lines.append(f"補充：{note}")
-    _, env, path = _deliver_envelope(
-        args,
-        cfg,
-        sender=agent,
-        to=orig["from"],
-        subject=f"Re: {orig['subject']}",
-        body="\n".join(lines),
-        kind="reply",
-        reply_to=orig["id"],
-        thread=orig.get("thread") or orig["id"],
-        project=orig.get("project"),
-        session=_resolve_session(None),
-        pull_first=False,
-    )
-    acked_path = store.ack(agent, orig["id"])
+    session = _resolve_session(None)
+    replies = []
+    # Read without moving mail. Validate the entire batch before any delivery/ack.
+    for env_id in args.id:
+        hit = store.find(agent, env_id)
+        if hit is None:
+            raise StoreError(f"no message {env_id} in mailbox {agent}")
+        state, path = hit
+        orig = envelope.loads(path.read_text(encoding="utf-8"))
+        if orig["id"] != env_id or orig["to"] != agent:
+            raise StoreError(f"message {env_id} does not match its mailbox or filename")
+        if orig["kind"] != "question":
+            raise envelope.EnvelopeError(f"{env_id} is not a question")
+        if state == "done":
+            raise StoreError(f"question {env_id} is already closed")
+        codes = {opt.partition("=")[0] for opt in (orig.get("question") or {}).get("options", [])}
+        if choice is not None and choice not in codes:
+            raise envelope.EnvelopeError(f"choice must match an option code of {env_id}")
+        lines = []
+        if choice:
+            lines.append(f"選擇：{choice}")
+        if note:
+            lines.append(f"補充：{note}")
+        reply = dict(sender=agent, to=orig["from"], subject=f"Re: {orig['subject']}",
+                     body="\n".join(lines), kind="reply", reply_to=orig["id"],
+                     thread=orig.get("thread") or orig["id"], project=orig.get("project"))
+        envelope.build(**reply, sender_session=session)
+        replies.append(reply)
+    results = []
+    for reply in replies:
+        _, env, path = _deliver_envelope(args, cfg, **reply, session=session, pull_first=False)
+        acked_path = store.ack(agent, reply["reply_to"])
+        results.append({"id": env["id"], "acked": reply["reply_to"], "path": str(path),
+                        "ack_path": str(acked_path)})
+    data = results[0] if len(results) == 1 else {"answers": results}
     try:
-        _sync(args, cfg, f"relay: {agent} answered {orig['id']} -> {orig['from']} {env['id']}")
+        _sync(args, cfg, f"relay: {agent} answered " + ", ".join(args.id))
     except gitsync.SyncError as exc:
-        _out(args, {"id": env["id"], "acked": orig["id"], "path": str(path),
-                    "ack_path": str(acked_path), "queued": True, "error": str(exc)},
-             f"queued answer {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
+        data.update(queued=True, error=str(exc))
+        _out(args, data, f"queued answers locally, not pushed yet ({exc}); run `sync` later, do not re-send")
         return 3
-    _out(args, {"id": env["id"], "acked": orig["id"], "path": str(path), "ack_path": str(acked_path)},
-         f"answered {orig['id']} -> {orig['from']} ({env['id']}); acked {orig['id']}")
+    text = "\n".join(f"answered {r['acked']} ({r['id']}); acked {r['acked']}" for r in results)
+    _out(args, data, text)
     return 0
 
 
@@ -670,7 +702,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--body", default="")
     s.add_argument("--body-file", help="path, or - for stdin")
     s.add_argument("--option", action="append", help="choice option, e.g. 'A=keep'; repeatable")
-    s.add_argument("--recommend", help="recommended option key/label")
+    s.add_argument("--recommend", help="recommended option code (exact match)")
     s.add_argument("--deadline", help="decision deadline (single line)")
     s.add_argument("--priority", default="normal", choices=envelope.PRIORITIES)
     s.add_argument("--reply-to")
@@ -683,7 +715,7 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_ask)
 
     s = sub.add_parser("answer", help="reply to a decision question and ack it")
-    s.add_argument("id", help="the question message id")
+    s.add_argument("id", nargs="+", help="one or more question message ids")
     s.add_argument("--choice", help="chosen option")
     s.add_argument("--note", help="additional note")
     s.add_argument("--agent")
@@ -795,8 +827,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")
     s.add_argument("--all", action="store_true", help="include done")
-    s.add_argument("--kind", choices=envelope.KINDS, help="filter by message kind")
-    s.add_argument("--questions", action="store_true", help="shortcut for --kind question")
+    filters = s.add_mutually_exclusive_group()
+    filters.add_argument("--kind", choices=envelope.KINDS, help="filter by message kind")
+    filters.add_argument("--questions", action="store_true", help="shortcut for --kind question")
     s.set_defaults(func=cmd_inbox)
 
     s = sub.add_parser("sync", help="commit, pull and push the store")

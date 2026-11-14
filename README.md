@@ -41,6 +41,19 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # 看交接包
 
 每個指令加 `--json` 輸出機器可讀格式；加 `--no-sync` 只動本機、不碰 git。所有指令都接受 `--home <資料夾>`，可指定使用哪一個 relay home。
 
+### 非同步決策問答
+
+流程與欄位見 SPEC 第 1 節。收件端需先升級：舊版會略過 question 信。
+
+```powershell
+python -m agent_relay ask --to commander --subject "保留相容層？" --option "A=保留" --option "B=移除" --recommend A --deadline 2026-11-15
+python -m agent_relay inbox --questions
+python -m agent_relay read <id>
+python -m agent_relay answer <id1> <id2> --choice A --note "下個月再移除"
+```
+
+`recommend` 與 `--choice` 精確比對選項代號，非整段 `A=保留`。同一批套用共同答案；每題不同答案請分次執行。任一題驗證失敗整批不寄、不結案（結束碼 2）；已結案不能再答。只補充可用 `--note`，沒有選項的問題只接受 note。`inbox --questions` 不可搭配 `--kind`。回信內文使用 `選擇：<代號>`／`補充：<內容>`；單題 JSON 保持物件，多題為 `{"answers": [...]}`。
+
 ### 一台電腦：指揮者＋本機工人
 
 同一台電腦可以同時當指揮者和收件端。兩邊各用一個 home、共用同一份 store，各自有一個排程，並互相信任對方的簽章金鑰。一行指令建好，之後也能用它復原（SPEC §19）：
@@ -50,7 +63,7 @@ python -m pip install -e C:\GitHub\agent-relay            # 任何資料夾都�
 python -m agent_relay setup-local --auto                   # 指揮者＋本機工人＋兩個排程；可重複執行
 ```
 
-工人的政策在 `$HOME\.agent-relay-worker\config.json` 的 `dispatch` 段落（SPEC §7、§11、§15、§18）：允許的 runtime 與 `repo_roots`、`senders: ["commander"]`、`verify: {"command": "auto"}`、`push_branch`、`max_concurrent`、`daily_limit`、一般 task 用的 `default`。
+工人的政策在 `$HOME\.agent-relay-worker\config.json` 的 `dispatch` 段落（SPEC §7、§11、§13、§14、§15、§18）：允許的 runtime 與 `repo_roots`、`senders: ["commander"]`、`verify: {"command": "auto"}`、`push_branch`、`max_concurrent`、`daily_limit`、一般 task 用的 `default`。
 
 日常派工與驗收（在指揮者端）：
 

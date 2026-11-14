@@ -36,9 +36,17 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `project` | 否 | string | 收件端機器上的專案資料夾，或 `asr:<會話名或 id>`（從 [agent-session-restore](https://github.com/SanHsien/agent-session-restore) 的登記檔查路徑）。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
 | `refs` | 否 | string[] | 相關路徑或 URL |
 | `sender_session` | 否 | string | 寄出這封信的會話識別碼（例如 Claude Code 的 session id），讓指揮者的紀錄能對回是哪個會話派的工。1 至 128 個可見 ASCII 字元，不可有空白或換行，不可長得像機密（API key、token）；只放識別碼，不放憑證。`relay send --from-session <id>` 指定，沒指定時取環境變數 `CLAUDE_CODE_SESSION_ID`（該值不合法時警告並略過，不擋寄信；明確帶的旗標不合法則拒寄）。沒有這個欄位的舊信照常有效 |
-| `question` | 否 | object | 僅可於 `kind=question` 時攜帶的非同步決策結構（對應 `relay ask`、`relay inbox --questions`、`relay answer`）。可含 `options`（非空單行字串陣列）、`recommend`（非空單行字串；若同時有 `options` 須為其中之一）與 `deadline`（非空單行字串） |
+| `question` | 否 | object | 僅供 `kind=question`；只允許 `options`、`recommend`、`deadline`。`options` 若提供須至少兩個 `代號=說明` 單行字串；代號不可空白、含空白或 `=`，且不可重複，說明不可空白。`recommend` 必須完全符合某個選項代號（區分大小寫、不去除空白），不可填整個選項。`deadline` 為非空單行字串 |
 
-不認得的欄位要保留、不可報錯，方便日後加欄位。`refs` 必須是字串陣列；`subject`、`host`、`project` 不可含換行（它們會被寫進交接卡的 frontmatter）。
+信封頂層不認得的欄位要保留、不可報錯（`question` 物件除外），方便日後加欄位。`refs` 必須是字串陣列；`subject`、`host`、`project` 不可含換行（它們會被寫進交接卡的 frontmatter）。
+
+### 決策問答流程
+
+`relay ask --option A=保留 --option B=移除 --recommend A` 寄出 `kind=question`；也可省略選項以提出開放問題。提供 `recommend` 時必須同時提供選項。`inbox --questions` 列出未結案題目，與 `--kind` 互斥；`read <id>` 顯示選項、推薦與 deadline。
+
+`relay answer <id1> <id2> ... --choice A --note "理由"` 以同一代號與補充回答整批；不同答案請分次執行。單題語法維持相容；`--choice` 與非空 `--note` 至少提供一個。提供 choice 時必須完全符合該題的選項代號；無選項的開放問題只接受 note。不存在、非 question、已結案、重複 id 或無效 choice 都以結束碼 2 拒絕。先驗證全部原信與回覆信封，任一失敗時整批不回信、不結案、不移動原信；通過後才逐題寄 reply 並 ack，同步一次。這是驗證階段的全批拒絕保證，不是檔案系統或同步失敗時的交易回滾。
+
+回覆沿用原信 thread，`reply_to` 指向題目；內文為 `選擇：<代號>`，有 note 時另起一行 `補充：<補充內容>`，未提供的行省略。JSON 單題維持原物件，多題回傳 `{"answers": [<單題結果>, ...]}`。同步失敗以結束碼 3 回報 queued，勿重送。舊版用戶端不認得 question，會略過這類信；收件端需先升級。
 
 ### 名稱規則
 

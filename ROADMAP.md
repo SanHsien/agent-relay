@@ -4,11 +4,13 @@
 > 現況段的數字是 2026-10-29 依 `main` `a92207cb5833` 查的快照，開工前先重查 GitHub。
 
 ## 現況
+決策問答 T-20261114-05 已在工作樹補選項代號驗證、整批回答預檢與已結案保護；完整測試仍受 Windows sandbox 限制，尚未提交。協定與操作流程見 `SPEC.md` 第 1 節。
 多 Agent 寄信、派工、回報的協定（`SPEC.md`）與參考 CLI（`python -m agent_relay`），file＋git mailbox，Windows 原生；功能與實測紀錄對照見 `README.md:77-99`。2026-10-29 查：open issue／PR 0，Dependabot 與 code scanning open 0，`main` 上 CI、CodeQL、Dependency freshness 最近一次皆 success，從未發過 release（2026-10-29 `gh release list -R SanHsien/agent-relay`、`gh run list -R SanHsien/agent-relay -b main`）。維護者 2026-10-27 Antigravity 個人訂閱政策已落實：`--run agy` 工人與 `dispatch.default=agy` 已明確依政策拒絕，`advise` 路由已移除 agy，Antigravity 派法統一走 Desktop App 會話（`python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new`）。
 
 ## 近期：可以直接動手
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
+| 決策問答 T-20261114-05 交付驗收 | 本輪 sandbox 拒絕 `taskkill /T /F`，全套未綠，依授權不提交 | 在可終止測試子程序樹的環境執行全套 unittest、doc parity、links；全綠後只 commit `worker/relay-ask-fix`，不 push | Codex | [修正與環境證據](docs/evidence/2026-11-14-question-fixes.md) |
 
 ## 中期：等條件成立再做
 | 項目 | 觸發條件 | 驗收方式 | 建議執行者 | 證據 |

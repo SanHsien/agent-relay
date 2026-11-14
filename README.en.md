@@ -41,6 +41,19 @@ python -m agent_relay context --repo C:\GitHub\my-repo     # Inspect hand-over b
 
 Pass `--json` to any command for machine-readable output; pass `--no-sync` to operate locally without touching git. Every command accepts `--home <dir>` to select a specific relay home.
 
+### Async Decision Questions
+
+See SPEC Section 1 for the workflow and fields. Upgrade receivers first: older clients skip question messages.
+
+```powershell
+python -m agent_relay ask --to commander --subject "Keep compatibility?" --option "A=keep" --option "B=remove" --recommend A --deadline 2026-11-15
+python -m agent_relay inbox --questions
+python -m agent_relay read <id>
+python -m agent_relay answer <id1> <id2> --choice A --note "Remove next month"
+```
+
+`recommend` and `--choice` exactly match the option code, not the full `A=keep` string. One batch applies a common answer; use separate invocations for different answers. Any validation failure sends and acknowledges nothing (exit code 2); closed questions cannot be answered again. Use `--note` alone for comments; questions without options accept only a note. `inbox --questions` cannot be combined with `--kind`. Reply bodies use `選擇：<code>` / `補充：<note>`; single-question JSON remains an object, while batches use `{"answers": [...]}`.
+
 ### Single Machine: Commander + Local Worker
 
 A single computer can act as both commander and receiving worker. Each side uses its own relay home, shares the same store, registers its own scheduled task, and trusts the other side's signing key. Set up or repair everything in one command (SPEC §19):
@@ -50,7 +63,7 @@ python -m pip install -e C:\GitHub\agent-relay            # Run python -m agent_
 python -m agent_relay setup-local --auto                   # Commander + local worker + two scheduled tasks; idempotent
 ```
 
-Worker policy lives under `dispatch` in `$HOME\.agent-relay-worker\config.json` (SPEC §7, §11, §15, §18): allowed runtimes and `repo_roots`, `senders: ["commander"]`, `verify: {"command": "auto"}`, `push_branch`, `max_concurrent`, `daily_limit`, and `default` for plain tasks.
+Worker policy lives under `dispatch` in `$HOME\.agent-relay-worker\config.json` (SPEC §7, §11, §13, §14, §15, §18): allowed runtimes and `repo_roots`, `senders: ["commander"]`, `verify: {"command": "auto"}`, `push_branch`, `max_concurrent`, `daily_limit`, and `default` for plain tasks.
 
 Day-to-day dispatch and acceptance (on the commander side):
 

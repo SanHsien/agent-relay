@@ -97,18 +97,29 @@ def build(
 def _validate_question(q: object) -> None:
     if not isinstance(q, dict):
         raise EnvelopeError("question must be a JSON object")
+    if set(q) - {"options", "recommend", "deadline"}:
+        raise EnvelopeError("unknown question fields")
+    codes = set()
     if "options" in q:
         opts = q["options"]
-        if not isinstance(opts, list) or not opts:
-            raise EnvelopeError("question.options must be a non-empty list of strings")
+        if not isinstance(opts, list) or len(opts) < 2:
+            raise EnvelopeError("question.options must contain at least two options")
         for opt in opts:
             if not isinstance(opt, str) or not opt.strip() or any(ch in opt for ch in (chr(10), chr(13))):
                 raise EnvelopeError("each option in question.options must be a non-empty single-line string")
+            code, sep, description = opt.partition("=")
+            if not sep or not code or any(ch.isspace() for ch in code) or not description.strip():
+                raise EnvelopeError("each option must be code=description with a nonblank code and description")
+            if code in codes:
+                raise EnvelopeError("question option codes must be unique")
+            codes.add(code)
     for key in ("recommend", "deadline"):
         if key in q:
             val = q[key]
             if not isinstance(val, str) or not val.strip() or any(ch in val for ch in (chr(10), chr(13))):
                 raise EnvelopeError(f"question.{key} must be a non-empty single-line string")
+    if "recommend" in q and q["recommend"] not in codes:
+        raise EnvelopeError("question.recommend must match an option code exactly")
 
 
 def check_session(value: object) -> None:
