@@ -9,7 +9,6 @@
 ## 近期：可以直接動手
 | 項目 | 為什麼 | 驗收方式 | 建議執行者 | 證據 |
 | --- | --- | --- | --- | --- |
-| 支援非同步結構化決策問答（`ask`／待拍板佇列篩選與回傳，對應 `ai-inbox` `T-20261114-05`） | 目前 `KINDS` 只有 `task`/`reply`/`note`/`result`，Worker 施工中遇需人類二選一拍板時缺專屬結構化格式與待決策篩選視圖（對照 `claude-inbox` 設計，不需另起獨立協定或 Web 服務） | 1. 規格定案（沿用 `note` 擴充欄位或新增 `question` kind）；2. `relay send` / `relay inbox` 支援列出待拍板項目並將選項＋補充回傳原 `thread`；3. `python -m unittest discover -s tests`、`tools/check_doc_parity.py`、`tools/check_links.py` 全綠 | Claude Sonnet | `agent_relay/envelope.py:17`；`agent_relay/cli.py:316` |
 
 ## 中期：等條件成立再做
 | 項目 | 觸發條件 | 驗收方式 | 建議執行者 | 證據 |

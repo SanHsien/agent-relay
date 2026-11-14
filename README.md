@@ -96,6 +96,7 @@ python -m agent_relay accept <回信 id> --repo C:\GitHub\<repo>  # 在本機重
 | 清理 worktree／分支／run 紀錄 | `gc` | 17 | [T-11](docs/evidence/2026-10-21-t11-gc.md) | T-20261021-11 |
 | 不經人工的收信處理（預設工人、自動驗收、通知自動結案） | `dispatch.default`、`accept.auto` | 18 | — | — |
 | 本機一鍵建立與復原 | `setup-local` | 19 | [真實端到端](docs/evidence/2026-10-21-real-e2e.md) | — |
+| 非同步結構化決策問答 | `ask`／`inbox --questions`／`answer` | 1 | — | T-20261114-05 |
 
 Windows 相容性調研（herdr、magpie、opencodex、cortex）：[報告](docs/reports/2026-10-20-windows-session-control.md)。
 

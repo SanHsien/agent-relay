@@ -26,7 +26,7 @@ One message = one UTF-8 JSON file named `<id>.json`.
 | `from` | Yes | string | Sender mailbox name; see "Naming Rules" below |
 | `to` | Yes | string | Recipient mailbox name; same rules |
 | `created_at` | Yes | string | ISO 8601 UTC, e.g., `2026-10-20T01:23:45Z` |
-| `kind` | Yes | enum | `task` dispatch, `result` execution report, `reply` general reply, `note` notification |
+| `kind` | Yes | enum | `task` dispatch, `result` execution report, `reply` general reply, `note` notification, `question` decision request |
 | `subject` | Yes | string | Single-line title; cannot be blank or contain newlines |
 | `body` | Yes | string | Markdown body. Task messages must state the goal, acceptance criteria, and report format |
 | `priority` | No | enum | `high` / `normal` (default) / `low` |
@@ -36,6 +36,7 @@ One message = one UTF-8 JSON file named `<id>.json`.
 | `project` | No | string | Project directory on the receiver machine, or `asr:<session-name-or-id>` (resolved via the [agent-session-restore](https://github.com/SanHsien/agent-session-restore) registry). When `kind=task` and this field is set, the `handoff` doorbell drops a handoff card in that project |
 | `refs` | No | string[] | Related file paths or URLs |
 | `sender_session` | No | string | Identifier of the session that sent the mail (for example a Claude Code session id), so the commander's records can map a dispatch back to its session. 1 to 128 printable ASCII characters, no spaces or newlines, and nothing secret-shaped (API key, token): an identifier, never a credential. Set with `relay send --from-session <id>`; when absent, `CLAUDE_CODE_SESSION_ID` is used (an invalid value there is warned about and skipped without blocking the send; an invalid explicit flag refuses the send). Older mail without the field stays valid |
+| `question` | No | object | Optional structured decision payload allowed only when `kind=question` (used by `relay ask`, `relay inbox --questions`, and `relay answer`). Supports `options` (non-empty array of single-line strings), `recommend` (single-line string; must match an entry in `options` if provided), and `deadline` (non-empty single-line string) |
 
 Unrecognized fields must be preserved without raising an error so new fields can be added later. `refs` must be an array of strings; `subject`, `host`, and `project` must not contain newlines (they are written into handoff card frontmatter).
 

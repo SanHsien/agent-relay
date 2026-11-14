@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 SCHEMA = "agent-relay/envelope@1"
 
-KINDS = ("task", "reply", "note", "result")
+KINDS = ("task", "reply", "note", "result", "question")
 PRIORITIES = ("high", "normal", "low")
 
 # Mailbox names and ids become directory and file names, so keep them safe on
@@ -58,6 +58,7 @@ def build(
     refs: list[str] | None = None,
     dispatch: dict | None = None,
     result: dict | None = None,
+    question: dict | None = None,
     sender_session: str | None = None,
 ) -> dict:
     now = datetime.now(timezone.utc)
@@ -87,8 +88,27 @@ def build(
         env["dispatch"] = dispatch
     if result:
         env["result"] = result
+    if question is not None:
+        env["question"] = question
     validate(env)
     return env
+
+
+def _validate_question(q: object) -> None:
+    if not isinstance(q, dict):
+        raise EnvelopeError("question must be a JSON object")
+    if "options" in q:
+        opts = q["options"]
+        if not isinstance(opts, list) or not opts:
+            raise EnvelopeError("question.options must be a non-empty list of strings")
+        for opt in opts:
+            if not isinstance(opt, str) or not opt.strip() or any(ch in opt for ch in (chr(10), chr(13))):
+                raise EnvelopeError("each option in question.options must be a non-empty single-line string")
+    for key in ("recommend", "deadline"):
+        if key in q:
+            val = q[key]
+            if not isinstance(val, str) or not val.strip() or any(ch in val for ch in (chr(10), chr(13))):
+                raise EnvelopeError(f"question.{key} must be a non-empty single-line string")
 
 
 def check_session(value: object) -> None:
@@ -142,6 +162,10 @@ def validate(env: dict) -> None:
         from .dispatch import validate_spec  # late import: dispatch imports this module
 
         validate_spec(env["dispatch"])
+    if "question" in env:
+        if env["kind"] != "question":
+            raise EnvelopeError("only kind=question may carry a question object")
+        _validate_question(env["question"])
 
 
 def dumps(env: dict) -> str:

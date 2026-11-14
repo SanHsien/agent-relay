@@ -96,6 +96,7 @@ Commander ──send──▶ store/mailboxes/<worker>/new/ ──git push──
 | Garbage collection for worktrees / branches / run logs | `gc` | 17 | [T-11](docs/evidence/2026-10-21-t11-gc.md) | T-20261021-11 |
 | Unattended mail handling (default worker, auto-accept, auto-ack notes) | `dispatch.default`, `accept.auto` | 18 | — | — |
 | One-command local setup and recovery | `setup-local` | 19 | [Real E2E](docs/evidence/2026-10-21-real-e2e.md) | — |
+| Async structured decision questions | `ask` / `inbox --questions` / `answer` | 1 | — | T-20261114-05 |
 
 Windows compatibility research (herdr, magpie, opencodex, cortex): [Report](docs/reports/2026-10-20-windows-session-control.md).
 

@@ -165,10 +165,85 @@ def cmd_context(args, cfg) -> int:
     return 0
 
 
+def _read_body(args) -> str:
+    if getattr(args, "body_file", None):
+        return sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
+    return getattr(args, "body", "") or ""
+
+
+def _resolve_session(explicit: str | None) -> str | None:
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not raw:
+        return None
+    session = raw.strip()
+    try:  # an environment fallback must never block a send; an explicit flag may
+        envelope.check_session(session)
+    except envelope.EnvelopeError as exc:
+        print(f"warning: ignoring CLAUDE_CODE_SESSION_ID ({exc})", file=sys.stderr)
+        return None
+    return session
+
+
+def _deliver_envelope(
+    args,
+    cfg: dict,
+    *,
+    sender: str,
+    to: str,
+    subject: str,
+    body: str,
+    kind: str,
+    priority: str = "normal",
+    reply_to: str | None = None,
+    thread: str | None = None,
+    project: str | None = None,
+    refs: list[str] | None = None,
+    dispatch: dict | None = None,
+    question: dict | None = None,
+    session: str | None = None,
+    override_verdict: dict | None = None,
+    override_reason: str | None = None,
+    pull_first: bool = True,
+) -> tuple[int, dict, Path]:
+    store = Store(cfg["store"])
+    if pull_first and not args.no_sync:
+        gitsync.pull(Path(cfg["store"]))
+    if reply_to and not thread:
+        # A reply joins the original's thread, so a reply to a reply keeps the chain.
+        hit = store.find(sender, reply_to)
+        if hit is not None:
+            thread = envelope.loads(hit[1].read_text(encoding="utf-8")).get("thread")
+    env = envelope.build(
+        sender=sender,
+        to=to,
+        subject=subject,
+        body=body,
+        kind=kind,
+        priority=priority,
+        reply_to=reply_to,
+        thread=thread,
+        project=project,
+        refs=refs,
+        dispatch=dispatch,
+        question=question,
+        sender_session=session,
+    )
+    key = signing.settings(cfg, config.home())[0]
+    if key:
+        env = signing.sign(env, key)
+    elif env.get("dispatch"):
+        print("warning: no signing key (run `relay keygen`); receivers that require signatures will refuse this task",
+              file=sys.stderr)
+    path = store.deliver(env)
+    if override_verdict and override_verdict.get("override"):
+        _record_override(env, override_reason)
+    return 0, env, path
+
+
 def cmd_send(args, cfg) -> int:
-    body = args.body
-    if args.body_file:
-        body = sys.stdin.read() if args.body_file == "-" else Path(args.body_file).read_text(encoding="utf-8")
+    body = _read_body(args)
     sender = _agent(args, cfg, "sender")
     reason = (args.allow_unlisted_project or "").strip() if args.allow_unlisted_project is not None else None
     if reason is not None and len(reason) < antigravity_send.MIN_REASON:
@@ -186,46 +261,24 @@ def cmd_send(args, cfg) -> int:
             return 10  # nothing was written; the sidecar would have skipped this mail silently
     elif reason is not None:
         print("warning: --allow-unlisted-project only applies to --to antigravity; ignored", file=sys.stderr)
-    store = Store(cfg["store"])
-    if not args.no_sync:
-        gitsync.pull(Path(cfg["store"]))
-    thread = args.thread
-    if args.reply_to and not thread:
-        # A reply joins the original's thread, so a reply to a reply keeps the chain.
-        hit = store.find(sender, args.reply_to)
-        if hit is not None:
-            thread = envelope.loads(hit[1].read_text(encoding="utf-8")).get("thread")
-    session = args.from_session
-    if session is None and os.environ.get("CLAUDE_CODE_SESSION_ID"):
-        session = os.environ["CLAUDE_CODE_SESSION_ID"].strip()
-        try:  # an environment fallback must never block a send; an explicit flag may
-            envelope.check_session(session)
-        except envelope.EnvelopeError as exc:
-            print(f"warning: ignoring CLAUDE_CODE_SESSION_ID ({exc})", file=sys.stderr)
-            session = None
-    env = envelope.build(
+    _, env, path = _deliver_envelope(
+        args,
+        cfg,
         sender=sender,
         to=args.to,
         subject=args.subject,
-        body=body or "",
+        body=body,
         kind=args.kind,
         priority=args.priority,
         reply_to=args.reply_to,
-        thread=thread,
+        thread=args.thread,
         project=args.project,
         refs=args.ref,
         dispatch=_dispatch_spec(args),
-        sender_session=session,
+        session=_resolve_session(args.from_session),
+        override_verdict=verdict,
+        override_reason=reason,
     )
-    key = signing.settings(cfg, config.home())[0]
-    if key:
-        env = signing.sign(env, key)
-    elif env.get("dispatch"):
-        print("warning: no signing key (run `relay keygen`); receivers that require signatures will refuse this task",
-              file=sys.stderr)
-    path = store.deliver(env)
-    if verdict.get("override"):
-        _record_override(env, reason)
     try:
         _sync(args, cfg, f"relay: {env['from']} -> {env['to']} {env['id']}")
     except gitsync.SyncError as exc:
@@ -234,6 +287,83 @@ def cmd_send(args, cfg) -> int:
              f"queued {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
         return 3
     _out(args, {"id": env["id"], "path": str(path)}, f"sent {env['id']} -> {env['to']}")
+    return 0
+
+
+def cmd_ask(args, cfg) -> int:
+    sender = _agent(args, cfg, "sender")
+    question: dict = {}
+    if args.option:
+        question["options"] = list(args.option)
+    if args.recommend:
+        question["recommend"] = args.recommend
+    if args.deadline:
+        question["deadline"] = args.deadline
+    _, env, path = _deliver_envelope(
+        args,
+        cfg,
+        sender=sender,
+        to=args.to,
+        subject=args.subject,
+        body=_read_body(args),
+        kind="question",
+        priority=args.priority,
+        reply_to=args.reply_to,
+        thread=args.thread,
+        project=args.project,
+        refs=args.ref,
+        question=question or None,
+        session=_resolve_session(args.from_session),
+    )
+    try:
+        _sync(args, cfg, f"relay: {env['from']} asks {env['to']} {env['id']}")
+    except gitsync.SyncError as exc:
+        _out(args, {"id": env["id"], "path": str(path), "queued": True, "error": str(exc)},
+             f"queued {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
+        return 3
+    _out(args, {"id": env["id"], "path": str(path)}, f"asked {env['id']} -> {env['to']}")
+    return 0
+
+
+def cmd_answer(args, cfg) -> int:
+    choice = (args.choice or "").strip()
+    note = (args.note or "").strip()
+    if not choice and not note:
+        raise SystemExit("error: answer needs --choice and/or --note")
+    agent = _agent(args, cfg)
+    store = Store(cfg["store"])
+    if not args.no_sync:
+        gitsync.pull(Path(cfg["store"]))
+    orig = store.read(agent, args.id)
+    lines = []
+    if choice:
+        lines.append(f"選擇：{choice}")
+    if note:
+        lines.append(f"補充：{note}")
+    _, env, path = _deliver_envelope(
+        args,
+        cfg,
+        sender=agent,
+        to=orig["from"],
+        subject=f"Re: {orig['subject']}",
+        body="\n".join(lines),
+        kind="reply",
+        reply_to=orig["id"],
+        thread=orig.get("thread") or orig["id"],
+        project=orig.get("project"),
+        session=_resolve_session(None),
+        pull_first=False,
+    )
+    acked_path = store.ack(agent, orig["id"])
+    try:
+        _sync(args, cfg, f"relay: {agent} answered {orig['id']} -> {orig['from']} {env['id']}")
+    except gitsync.SyncError as exc:
+        _out(args, {"id": env["id"], "acked": orig["id"], "path": str(path),
+                    "ack_path": str(acked_path), "queued": True, "error": str(exc)},
+             f"queued answer {env['id']} locally, not pushed yet ({exc}); run `sync` later, do not re-send")
+        return 3
+    _out(args, {"id": env["id"], "acked": orig["id"], "path": str(path), "ack_path": str(acked_path)},
+         f"answered {orig['id']} -> {orig['from']} ({env['id']}); acked {orig['id']}")
     return 0
 
 
@@ -313,8 +443,11 @@ def cmd_inbox(args, cfg) -> int:
         gitsync.pull(Path(cfg["store"]))
     states = ("new", "cur", "done") if args.all else ("new", "cur")
     items = Store(cfg["store"]).list(agent, states)
+    want_kind = "question" if getattr(args, "questions", False) else getattr(args, "kind", None)
+    if want_kind:
+        items = [(s, e) for s, e in items if e["kind"] == want_kind]
     rows = [{"state": s, "id": e["id"], "from": e["from"], "kind": e["kind"], "subject": e["subject"]} for s, e in items]
-    text = "\n".join(f"{r['state']:4}  {r['id']}  {r['from']:>12}  {r['kind']:6}  {r['subject']}" for r in rows)
+    text = "\n".join(f"{r['state']:4}  {r['id']}  {r['from']:>12}  {r['kind']:8}  {r['subject']}" for r in rows)
     _out(args, rows, text or f"(mailbox {agent} is empty)")
     return 0
 
@@ -325,10 +458,22 @@ def cmd_read(args, cfg) -> int:
         gitsync.pull(Path(cfg["store"]))
     env = Store(cfg["store"]).read(agent, args.id)
     _sync(args, cfg, f"relay: {agent} read {args.id}")
+    q = env.get("question")
+    q_block = ""
+    if isinstance(q, dict):
+        q_lines = []
+        if q.get("options"):
+            q_lines.append("options: " + " | ".join(q["options"]))
+        if q.get("recommend"):
+            q_lines.append(f"recommend: {q['recommend']}")
+        if q.get("deadline"):
+            q_lines.append(f"deadline: {q['deadline']}")
+        if q_lines:
+            q_block = "\n" + "\n".join(q_lines) + "\n"
     text = (
         f"id:      {env['id']}\nfrom:    {env['from']} ({env.get('host', '?')})\nto:      {env['to']}\n"
         f"kind:    {env['kind']}  priority: {env.get('priority', 'normal')}\nthread:  {env.get('thread')}\n"
-        f"subject: {env['subject']}\n\n{env['body']}"
+        f"subject: {env['subject']}\n{q_block}\n{env['body']}"
     )
     _out(args, env, text)
     return 0
@@ -518,6 +663,32 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--base", help="commit sha the worker starts from (receiver fetches origin if needed)")
     s.set_defaults(func=cmd_send)
 
+    s = sub.add_parser("ask", help="ask a structured decision question (kind=question)")
+    s.add_argument("--to", default="commander")
+    s.add_argument("--from", dest="sender")
+    s.add_argument("--subject", required=True)
+    s.add_argument("--body", default="")
+    s.add_argument("--body-file", help="path, or - for stdin")
+    s.add_argument("--option", action="append", help="choice option, e.g. 'A=keep'; repeatable")
+    s.add_argument("--recommend", help="recommended option key/label")
+    s.add_argument("--deadline", help="decision deadline (single line)")
+    s.add_argument("--priority", default="normal", choices=envelope.PRIORITIES)
+    s.add_argument("--reply-to")
+    s.add_argument("--thread")
+    s.add_argument("--project")
+    s.add_argument("--ref", action="append")
+    s.add_argument("--from-session", metavar="ID",
+                   help="id of the asking session (default: $CLAUDE_CODE_SESSION_ID)")
+    s.add_argument("--allow-unlisted-project", metavar="REASON", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_ask)
+
+    s = sub.add_parser("answer", help="reply to a decision question and ack it")
+    s.add_argument("id", help="the question message id")
+    s.add_argument("--choice", help="chosen option")
+    s.add_argument("--note", help="additional note")
+    s.add_argument("--agent")
+    s.set_defaults(func=cmd_answer)
+
     s = sub.add_parser("archive", help="archive an Antigravity conversation the relay opened (SPEC section 20)")
     target = s.add_mutually_exclusive_group(required=True)
     target.add_argument("--conversation", help="conversation UUID")
@@ -624,6 +795,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("inbox", help="list open messages")
     s.add_argument("--agent")
     s.add_argument("--all", action="store_true", help="include done")
+    s.add_argument("--kind", choices=envelope.KINDS, help="filter by message kind")
+    s.add_argument("--questions", action="store_true", help="shortcut for --kind question")
     s.set_defaults(func=cmd_inbox)
 
     s = sub.add_parser("sync", help="commit, pull and push the store")

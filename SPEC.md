@@ -26,7 +26,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `from` | 是 | string | 寄件信箱名，見下方「名稱規則」 |
 | `to` | 是 | string | 收件信箱名，規則同上 |
 | `created_at` | 是 | string | ISO 8601 UTC，例如 `2026-10-20T01:23:45Z` |
-| `kind` | 是 | enum | `task` 派工、`result` 施工回報、`reply` 一般回覆、`note` 通知 |
+| `kind` | 是 | enum | `task` 派工、`result` 施工回報、`reply` 一般回覆、`note` 通知、`question` 決策提問 |
 | `subject` | 是 | string | 一行標題，不可空白，不可有換行 |
 | `body` | 是 | string | 內文，Markdown。派工信要寫目標、驗收條件、回報格式 |
 | `priority` | 否 | enum | `high` / `normal`（預設）/ `low` |
@@ -36,6 +36,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `project` | 否 | string | 收件端機器上的專案資料夾，或 `asr:<會話名或 id>`（從 [agent-session-restore](https://github.com/SanHsien/agent-session-restore) 的登記檔查路徑）。`kind=task` 且有這欄時，`handoff` 門鈴會在該專案放交接卡 |
 | `refs` | 否 | string[] | 相關路徑或 URL |
 | `sender_session` | 否 | string | 寄出這封信的會話識別碼（例如 Claude Code 的 session id），讓指揮者的紀錄能對回是哪個會話派的工。1 至 128 個可見 ASCII 字元，不可有空白或換行，不可長得像機密（API key、token）；只放識別碼，不放憑證。`relay send --from-session <id>` 指定，沒指定時取環境變數 `CLAUDE_CODE_SESSION_ID`（該值不合法時警告並略過，不擋寄信；明確帶的旗標不合法則拒寄）。沒有這個欄位的舊信照常有效 |
+| `question` | 否 | object | 僅可於 `kind=question` 時攜帶的非同步決策結構（對應 `relay ask`、`relay inbox --questions`、`relay answer`）。可含 `options`（非空單行字串陣列）、`recommend`（非空單行字串；若同時有 `options` 須為其中之一）與 `deadline`（非空單行字串） |
 
 不認得的欄位要保留、不可報錯，方便日後加欄位。`refs` 必須是字串陣列；`subject`、`host`、`project` 不可含換行（它們會被寫進交接卡的 frontmatter）。
 
