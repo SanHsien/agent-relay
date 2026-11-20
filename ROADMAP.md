@@ -5,6 +5,7 @@
 
 ## 現況
 決策問答 T-20261114-05 的選項代號驗證、整批回答預檢與已結案保護已提交為 `88addb6`；依整合者沙盒外驗收回報，Python 3.14 與 3.11 各 481 tests OK、doc parity PASS、links 0 broken、mutation 21/21 killed。第二輪小修補上單行 note、Unicode `Cf` 代號拒絕與兩項 mutation 回歸；驗證範圍見 [修正證據](docs/evidence/2026-11-14-question-fixes.md)。協定與操作流程見 `SPEC.md` 第 1 節。
+2026-11-20 store 同步鎖卡 5 分鐘已修：Windows 上等待者 `read_text` 鎖檔的瞬間，持有者的 `unlink` 會 WinError 32，`gitsync._release` 吞掉例外後鎖檔留著；`read` 的 pull 留下鎖，接著自己的 sync 等自己 `LOCK_WAIT_S`（300 s）。現在 `_release` 遇 `PermissionError` 重試最多 5 秒，`_acquire` 把寫著自己 pid 的鎖當殘留處理；回歸測試在 `tests/test_locks.py` `SyncLockTests`。
 多 Agent 寄信、派工、回報的協定（`SPEC.md`）與參考 CLI（`python -m agent_relay`），file＋git mailbox，Windows 原生；功能與實測紀錄對照見 `README.md:77-99`。2026-10-29 查：open issue／PR 0，Dependabot 與 code scanning open 0，`main` 上 CI、CodeQL、Dependency freshness 最近一次皆 success，從未發過 release（2026-10-29 `gh release list -R SanHsien/agent-relay`、`gh run list -R SanHsien/agent-relay -b main`）。維護者 2026-10-27 Antigravity 個人訂閱政策已落實：`--run agy` 工人與 `dispatch.default=agy` 已明確依政策拒絕，`advise` 路由已移除 agy，Antigravity 派法統一走 Desktop App 會話（`python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new`）。
 
 ## 近期：可以直接動手
@@ -18,6 +19,7 @@
 | 恢復 agy 工人，改走正式 API 計費 | 維護者改用 `GEMINI_API_KEY` 或 Vertex，且有不經個人訂閱 CLI 的呼叫方式 | 新 runtime 只讀環境變數中的 API 金鑰、不讀 App／CLI 登入狀態；測試涵蓋未設金鑰時拒絕；SPEC 與 README 同步 | Claude Sonnet | `agent_relay/dispatch.py:46` |
 | `advise` 的路由表跟上 agent-advisor 的 lane 定義 | agent-advisor 改了 lane（模型分層或判準）；判準由 agent-advisor 擁有，本 repo 只是消費者 | `ROUTES`／`HIGH_*`／`LOW_*` 與 agent-advisor 新版一致，docstring 註明對照的 agent-advisor commit；`tests` 綠 | Claude Sonnet | `agent_relay/advisor.py:1-15` |
 | `repo_id` 正規化 `ssh://git@host/x/y` 與 `git@host:x/y` 為同一 id | 實際出現兩台機器用不同 remote 寫法導致鎖或 claim 對不上 | 新測試：兩種寫法算出相同 id；舊 claim 的相容讀取有測試 | Claude Opus | `agent_relay/locks.py:120` |
+| 查明 2026-11-20 約 19:10 sidecar（`agent_relay.antigravity`）持有同步鎖、擋住寄信的原因 | 修好 `_release` 後，仍再次出現「存活、沒有 git 子行程、不是自己」的行程持鎖超過 `LOCK_WAIT_S` | 當下記錄鎖檔內容與 mtime、持鎖行程命令列與 Python stack；定位後補重現測試再修 | Claude Opus | `agent_relay/gitsync.py`（`_release`、`_acquire`）；`agent_relay/antigravity.py:42`、`:126` |
 | 收掉 gitsync 剩下的窄競態（第三位等待者在搬走與放回之間建鎖） | 實際出現雙寫入 | 有重現測試，修後通過；與 `locks._LocalLock` 採同一做法 | Claude Opus | `agent_relay/gitsync.py`；`agent_relay/locks.py` |
 
 ## 刻意不做

@@ -188,6 +188,35 @@ class SyncLockTests(unittest.TestCase):
                     gitsync._acquire(lock)
             self.assertEqual(lock.read_text(encoding="utf-8"), live)
 
+    @unittest.skipUnless(sys.platform == "win32", "only Windows refuses to delete a file another handle has open")
+    def test_release_survives_a_waiter_reading_the_lock(self):
+        """Seen live 2026-11-20: a waiter's read of the lock made the holder's unlink fail (WinError 32);
+        the failure was swallowed and the lock outlived its release, blocking every send for 300 s."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lock = Path(tmp) / "agent-relay-sync.lock"
+            token = gitsync._acquire(lock)
+            reader = open(lock, encoding="utf-8")  # what a waiter's lock.read_text() holds for a moment
+            closer = threading.Timer(0.3, reader.close)
+            closer.start()
+            try:
+                gitsync._release(lock, token)
+            finally:
+                closer.join()
+                reader.close()
+            self.assertFalse(lock.exists(), "release left the lock behind")
+
+    def test_lock_left_by_this_process_does_not_block_it(self):
+        """Seen live 2026-11-20: `read` left its own pull's lock behind, then its sync waited on
+        itself for LOCK_WAIT_S. Under the in-process lock, a sync lock naming our own pid is an orphan."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git("init", "-q", cwd=root)
+            lock = root / ".git" / "agent-relay-sync.lock"
+            lock.write_text(f"{os.getpid()}-orphaned", encoding="utf-8")
+            with mock.patch.object(gitsync, "LOCK_WAIT_S", 1):
+                gitsync.pull(root)  # no remote: only takes and releases the lock
+            self.assertFalse(lock.exists())
+
 
 class DispatchClaimTests(Base):
     def setUp(self):

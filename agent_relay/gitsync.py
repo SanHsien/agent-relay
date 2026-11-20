@@ -79,7 +79,9 @@ def _acquire(lock: Path) -> str:
             try:
                 seen = lock.read_text(encoding="utf-8")
                 owner = seen.split("-")[0]
-                gone = owner.isdigit() and not pid_alive(int(owner))
+                # Our own pid is an orphan too: callers hold _thread_lock at depth 0, so no other
+                # thread here owns it. Waiting on it would wait on ourselves for LOCK_WAIT_S.
+                gone = owner.isdigit() and (int(owner) == os.getpid() or not pid_alive(int(owner)))
                 if gone or time.time() - lock.stat().st_mtime > LOCK_STALE_S:  # its owner crashed
                     grave = lock.with_name(f"{lock.name}.stale-{token}")
                     os.replace(lock, grave)
@@ -95,12 +97,24 @@ def _acquire(lock: Path) -> str:
             time.sleep(0.5)
 
 
+RELEASE_RETRY_S = 5.0
+
+
 def _release(lock: Path, token: str) -> None:
-    try:
-        if lock.read_text(encoding="utf-8") == token:
-            lock.unlink()
-    except OSError:
-        pass
+    # On Windows, unlink fails (WinError 32) while a waiter's read_text has the file open.
+    # Swallowing that once left the lock behind a live process; the reader lets go in microseconds.
+    give_up = time.monotonic() + RELEASE_RETRY_S
+    while True:
+        try:
+            if lock.read_text(encoding="utf-8") == token:
+                lock.unlink()
+            return
+        except PermissionError:
+            if time.monotonic() > give_up:
+                return
+            time.sleep(0.01)
+        except OSError:
+            return
 
 
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
