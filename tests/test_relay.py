@@ -268,6 +268,25 @@ class DoorbellTests(Base):
         self.assertEqual(doorbell.ring(env, [bell])["0:command"], "ok")
         self.assertIn("quiet", log.read_text(encoding="utf-8"))
 
+    def test_min_priority_of_the_wrong_type_is_a_bell_error_not_a_crash(self):
+        for bad in (["high"], {"high": 1}, 2, True):
+            _, bell = self.recorder(min_priority=bad)
+            env = envelope.build(sender="a", to="b", subject="x", body="", priority="high")
+            self.assertTrue(doorbell.ring(env, [bell])["0:command"].startswith("error"), bad)
+
+    def test_bad_min_priority_does_not_stop_watch_or_other_bells(self):
+        log, good = self.recorder()
+        _, bad = self.recorder(name="bad.txt", min_priority=["high"])
+        cfg = {"store": str(self.dir / "store"), "agent": "hermes", "doorbells": [bad, good, {"type": "toast", "min_priority": {}}]}
+        for s in ("one", "two"):
+            Store(cfg["store"]).deliver(envelope.build(sender="commander", to="hermes", subject=s, body=""))
+        with mock.patch.dict(doorbell.CHANNELS, {"toast": lambda env, bell: "ok"}):
+            report = cli.watch_once("hermes", cfg, sync=False)
+        self.assertEqual(len(report), 2)
+        self.assertTrue(all(r["bells"]["0:command"].startswith("error") for r in report))
+        self.assertTrue(all(r["bells"]["2:toast"].startswith("error") for r in report))
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)
+
     def test_bad_min_priority_is_an_error_not_silence(self):
         _, bell = self.recorder(min_priority="urgent")
         env = envelope.build(sender="a", to="b", subject="x", body="", priority="high")
@@ -387,7 +406,9 @@ class WatchRetryTests(Base):
         log, fixed = self.dir / "calls.txt", self.dir / "fixed"
         code = ("import sys, os; open(sys.argv[1],'a').write('x\\n'); "
                 "sys.exit(0 if os.path.exists(sys.argv[2]) else 1)")
-        return log, fixed, {"type": "command", "argv": [sys.executable, "-c", code, str(log), str(fixed)], **extra}
+        # Retries are opt-in (a command that already notified and then exits non-zero must not re-send).
+        return log, fixed, {"type": "command", "argv": [sys.executable, "-c", code, str(log), str(fixed)],
+                            "retries": 3, **extra}
 
     def calls(self, log):
         return len(log.read_text().splitlines()) if log.exists() else 0
@@ -455,6 +476,22 @@ class WatchRetryTests(Base):
         self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=99_999.0), [])
         self.assertEqual(self.calls(log), 2)
 
+    def test_retries_are_off_unless_configured(self):
+        log, _, bell = self.flaky()
+        bell.pop("retries")
+        cfg = self.cfg([bell])
+        env = self.deliver(cfg)
+        entry = cli.watch_once("cc", cfg, sync=False, now=0.0)[0]
+        self.assertNotIn("retry", entry)
+        self.assertIn(env["id"], doorbell.load_rung("cc"))
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=10_000.0), [])
+        self.assertEqual(self.calls(log), 1)  # an existing command bell still runs exactly once
+
+    def test_retries_are_capped(self):
+        self.assertEqual(doorbell.retry_policy({"type": "command", "retries": 1000})[0], doorbell.MAX_RETRIES)
+        self.assertEqual(doorbell.retry_policy({"type": "command", "retries": "5"})[0], 0)  # invalid -> off
+        self.assertEqual(doorbell.retry_policy({"type": "dispatch", "retries": 5})[0], 0)
+
     def test_retries_zero_keeps_the_old_record_on_first_try(self):
         _, _, bell = self.flaky(retries=0)
         cfg = self.cfg([bell])
@@ -492,7 +529,7 @@ class WatchRetryTests(Base):
                 raise RuntimeError("notification service down")
             return "ok"
 
-        cfg = self.cfg([{"type": "toast"}])
+        cfg = self.cfg([{"type": "toast", "retries": 3}])
         a, b = self.deliver(cfg, "a"), self.deliver(cfg, "b")
         with mock.patch.dict(doorbell.CHANNELS, {"toast": toast}):
             first = cli.watch_once("cc", cfg, sync=False, now=0.0)
@@ -511,6 +548,63 @@ class WatchRetryTests(Base):
             fixed.touch()
             cli.watch_once("cc", cfg, sync=False, now=10_000.0)
         self.assertEqual(auto.call_count, 1)
+
+class WatchStateFailSafeTests(Base):
+    """Unreadable rung/retry state must not turn into "nothing has rung yet" and re-ring everything."""
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+        patch = mock.patch.dict(doorbell.CHANNELS, {"dispatch": lambda env, bell: self.started.append(env["id"]) or "ok"})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.cfg = {"store": str(self.dir / "store"), "agent": "cc", "doorbells": [{"type": "dispatch"}]}
+        self.env = envelope.build(sender="commander", to="cc", subject="s", body="")
+        Store(self.cfg["store"]).deliver(self.env)
+        (self.dir / "home").mkdir(parents=True, exist_ok=True)
+
+    def log(self):
+        return (self.dir / "home" / "relay.log").read_text(encoding="utf-8")
+
+    def test_corrupt_rung_file_rings_nothing_and_says_so(self):
+        (self.dir / "home" / "rung-cc.json").write_text("{not json", encoding="utf-8")
+        with self.assertRaises(doorbell.StateError):
+            cli.watch_once("cc", self.cfg, sync=False)
+        self.assertEqual(self.started, [])
+        self.assertIn("rung-cc.json", self.log())
+
+    def test_rung_file_of_the_wrong_shape_rings_nothing(self):
+        (self.dir / "home" / "rung-cc.json").write_text('{"a": 1}', encoding="utf-8")
+        with self.assertRaises(doorbell.StateError):
+            cli.watch_once("cc", self.cfg, sync=False)
+        self.assertEqual(self.started, [])
+
+    def test_corrupt_retry_file_rings_nothing(self):
+        (self.dir / "home" / "ring-retry-cc.json").write_text("[1, 2", encoding="utf-8")
+        with self.assertRaises(doorbell.StateError):
+            cli.watch_once("cc", self.cfg, sync=False)
+        self.assertEqual(self.started, [])
+        self.assertIn("ring-retry-cc.json", self.log())
+
+    def test_malformed_retry_entry_is_settled_without_ringing_dispatch(self):
+        (self.dir / "home" / "ring-retry-cc.json").write_text(
+            json.dumps({self.env["id"]: {"0:dispatch": {"next_at": "soon"}}}), encoding="utf-8")
+        report = cli.watch_once("cc", self.cfg, sync=False, now=10_000.0)
+        self.assertEqual(self.started, [])
+        self.assertIn(self.env["id"], doorbell.load_rung("cc"))
+        self.assertEqual(report, [])
+
+    def test_watch_once_command_reports_unreadable_state(self):
+        (self.dir / "home" / "rung-cc.json").write_text("{not json", encoding="utf-8")
+        with mock.patch.object(cli.config, "load", return_value=self.cfg),                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            code = cli.main(["watch", "--once", "--no-sync", "--agent", "cc"])
+        self.assertEqual(code, 1)
+        self.assertIn("rung-cc.json", err.getvalue())
+        self.assertEqual(self.started, [])
+
+    def test_missing_state_files_are_a_normal_first_run(self):
+        self.assertEqual(len(cli.watch_once("cc", self.cfg, sync=False)), 1)
+        self.assertEqual(self.started, [self.env["id"]])
 
 
 class PollerTests(unittest.TestCase):

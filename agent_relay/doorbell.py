@@ -260,7 +260,7 @@ def skip_reason(env: dict, bell: dict) -> str | None:
         return "skipped: kind filter"
     floor = bell.get("min_priority")
     if floor is not None:
-        if floor not in PRIORITY_RANK:
+        if not isinstance(floor, str) or floor not in PRIORITY_RANK:  # a list or dict must not raise TypeError
             raise ValueError(f"min_priority must be one of {tuple(PRIORITY_RANK)}, got {floor!r}")
         if PRIORITY_RANK.get(env.get("priority", "normal"), 1) < PRIORITY_RANK[floor]:
             return "skipped: priority filter"
@@ -344,11 +344,31 @@ def _rung_path(agent: str) -> Path:
     return config.home() / f"rung-{agent}.json"
 
 
-def load_rung(agent: str) -> list[str]:
+class StateError(Exception):
+    """A rung/retry state file exists but cannot be trusted: ringing now could re-ring everything."""
+
+
+def _load_state(path: Path, shape: type, strict: bool):
     try:
-        return json.loads(_rung_path(agent).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return shape()  # first run on this machine
+    except (OSError, ValueError) as exc:
+        if strict:
+            _log(f"STATE UNREADABLE {path}: {exc}; not ringing until it is fixed or deleted")
+            raise StateError(f"{path} is unreadable ({exc}); fix or delete it (deleting re-rings every new mail)") from exc
+        return shape()
+    if not isinstance(data, shape) or (shape is list and not all(isinstance(x, str) for x in data)):
+        if strict:
+            _log(f"STATE UNREADABLE {path}: not a JSON {shape.__name__}; not ringing until it is fixed or deleted")
+            raise StateError(f"{path} is not a JSON {shape.__name__}; fix or delete it (deleting re-rings every new mail)")
+        return shape()
+    return data
+
+
+def load_rung(agent: str, strict: bool = False) -> list[str]:
+    """Ids already rung. strict: raise StateError instead of treating a broken file as empty."""
+    return _load_state(_rung_path(agent), list, strict)
 
 
 def _write_atomic(path: Path, data) -> None:
@@ -372,7 +392,8 @@ def save_rung(agent: str, ids: list[str]) -> None:
 # ---------------------------------------------------------------- retrying failed bells
 
 RETRYABLE = ("toast", "command", "handoff")  # dispatch keeps its own run state; a re-ring could start a 2nd worker
-DEFAULT_RETRIES = 3
+DEFAULT_RETRIES = 0  # opt-in: a command that already notified and then exits non-zero must not re-send
+MAX_RETRIES = 10
 DEFAULT_RETRY_BACKOFF_S = 60
 
 
@@ -384,6 +405,7 @@ def retry_policy(bell: dict) -> tuple[int, int]:
     backoff = bell.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_S)
     if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
         retries = DEFAULT_RETRIES
+    retries = min(retries, MAX_RETRIES)
     if not isinstance(backoff, (int, float)) or isinstance(backoff, bool) or backoff <= 0:
         backoff = DEFAULT_RETRY_BACKOFF_S
     return retries, backoff
@@ -393,13 +415,24 @@ def _retry_path(agent: str) -> Path:
     return config.home() / f"ring-retry-{agent}.json"
 
 
-def load_retry(agent: str) -> dict:
+def load_retry(agent: str, strict: bool = False) -> dict:
     """{mail id: {bell name: {"attempts", "next_at", "error"}}} for bells still to be retried."""
-    try:
-        data = json.loads(_retry_path(agent).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
+    return _load_state(_retry_path(agent), dict, strict)
+
+
+def valid_retry_entry(entry) -> bool:
+    """A retry entry we can act on; anything else is settled without ringing (fail safe)."""
+    if not isinstance(entry, dict):
+        return False
+    for state in entry.values():
+        if not isinstance(state, dict):
+            return False
+        try:
+            float(state.get("next_at", 0))
+            int(state.get("attempts", 0))
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def save_retry(agent: str, pending: dict) -> None:

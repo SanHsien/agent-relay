@@ -539,7 +539,9 @@ def watch_once(agent: str, cfg: dict, sync: bool = True, now: float | None = Non
     now = time.time() if now is None else now
     if sync:
         gitsync.pull(Path(cfg["store"]))
-    rung = doorbell.load_rung(agent)
+    # Unreadable state raises StateError: treating it as empty would re-ring (and re-dispatch) everything.
+    rung = doorbell.load_rung(agent, strict=True)
+    stored = doorbell.load_retry(agent, strict=True)
     reaped = dispatcher.reap_interrupted(agent, cfg, rung=rung)
     for env_id in reaped:
         doorbell._log(f"dispatch {env_id} interrupted: answered with status interrupted")
@@ -548,9 +550,15 @@ def watch_once(agent: str, cfg: dict, sync: bool = True, now: float | None = Non
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
     bells = cfg["doorbells"]
     names = [doorbell.bell_name(i, bell) for i, bell in enumerate(bells)]
-    stored = doorbell.load_retry(agent)
     # Mail that left new/ (acked, or rung by a run cut short) needs no retry: forget it.
-    pending = {env["id"]: stored[env["id"]] for env in fresh if isinstance(stored.get(env["id"]), dict)}
+    pending = {env["id"]: stored[env["id"]] for env in fresh if env["id"] in stored}
+    for env_id in [k for k, v in pending.items() if not doorbell.valid_retry_entry(v)]:
+        # A broken entry cannot say which bells already rang: settle it rather than ring them all again.
+        doorbell._log(f"ring {env_id} retry state malformed; recorded as rung without ringing")
+        pending.pop(env_id)
+        rung.append(env_id)
+        doorbell.save_rung(agent, rung)
+    fresh = [env for env in fresh if env["id"] not in rung]
     if pending != stored:
         doorbell.save_retry(agent, pending)
     due: dict[str, set[str]] = {}
@@ -558,7 +566,7 @@ def watch_once(agent: str, cfg: dict, sync: bool = True, now: float | None = Non
         if env["id"] not in pending:
             due[env["id"]] = set(names)
             continue
-        waiting = {n: s for n, s in pending[env["id"]].items() if n in names and isinstance(s, dict)}
+        waiting = {n: s for n, s in pending[env["id"]].items() if n in names}
         ready = {n for n, s in waiting.items() if float(s.get("next_at", 0)) <= now}
         if ready or not waiting:  # nothing left to wait for (bells reconfigured): settle it now
             due[env["id"]] = ready
@@ -679,7 +687,7 @@ def cmd_watch(args, cfg) -> int:
     while True:
         try:
             report = watch_once(agent, cfg, sync=not args.no_sync)
-        except (gitsync.SyncError, OSError) as exc:
+        except (gitsync.SyncError, OSError, doorbell.StateError) as exc:
             doorbell._log(f"watch {agent} failed: {exc}")
             if args.once:
                 print(f"watch failed: {exc}", file=sys.stderr)
