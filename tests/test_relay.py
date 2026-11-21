@@ -243,6 +243,36 @@ class DoorbellTests(Base):
             env["project"] = "asr:nobody"
             self.assertTrue(doorbell.ring(env, [{"type": "handoff", "project_roots": [str(self.dir)]}])["0:handoff"].startswith("error"))
 
+    def recorder(self, name="rang.txt", **extra):
+        log = self.dir / name
+        argv = [sys.executable, "-c", "import sys; open(sys.argv[1],'a',encoding='utf-8').write(sys.argv[2]+'\\n')",
+                str(log), "{summary}"]
+        return log, {"type": "command", "argv": argv, **extra}
+
+    def test_min_priority_keeps_low_priority_mail_quiet(self):
+        _, bell = self.recorder(min_priority="high")
+        normal = envelope.build(sender="a", to="b", subject="fyi", body="")
+        high = envelope.build(sender="a", to="b", subject="broken", body="", priority="high")
+        self.assertEqual(doorbell.ring(normal, [bell])["0:command"], "skipped: priority filter")
+        self.assertEqual(doorbell.ring(high, [bell])["0:command"], "ok")
+
+    def test_min_priority_is_a_threshold_not_an_exact_match(self):
+        _, bell = self.recorder(min_priority="normal")
+        for prio, want in (("low", "skipped: priority filter"), ("normal", "ok"), ("high", "ok")):
+            env = envelope.build(sender="a", to="b", subject=prio, body="", priority=prio)
+            self.assertEqual(doorbell.ring(env, [bell])["0:command"], want, prio)
+
+    def test_without_min_priority_every_priority_rings(self):
+        log, bell = self.recorder()
+        env = envelope.build(sender="a", to="b", subject="quiet", body="", priority="low")
+        self.assertEqual(doorbell.ring(env, [bell])["0:command"], "ok")
+        self.assertIn("quiet", log.read_text(encoding="utf-8"))
+
+    def test_bad_min_priority_is_an_error_not_silence(self):
+        _, bell = self.recorder(min_priority="urgent")
+        env = envelope.build(sender="a", to="b", subject="x", body="", priority="high")
+        self.assertTrue(doorbell.ring(env, [bell])["0:command"].startswith("error"))
+
     def test_command_placeholders_are_not_shell(self):
         env = envelope.build(sender="a", to="b", subject="x; rm -rf /", body="")
         out = self.dir / "out.txt"

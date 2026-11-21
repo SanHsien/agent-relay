@@ -99,10 +99,10 @@ Doorbells are notifications only; **the message files in the store are the sourc
 | `command` | Executes a command directly (no shell), substituting `{id}`, `{from}`, `{to}`, `{subject}`, `{kind}`, `{summary}` in arguments. **Rejects `.bat`/`.cmd`**: Windows hands those to `cmd.exe`, which re-parses arguments and turns `&` inside message text into shell commands. Because values may start with `-`, pass `--` before positional placeholders if the target program accepts flags | `argv`, `timeout` (seconds) |
 | `handoff` | When `kind=task` and `project` is set, writes a dropoff/pickup handoff card into `<project>/.claude/handoffs/` (named `relay-<id>.md`, idempotent on re-ring) so the next session's `/pickup` picks it up. The project must reside under `project_roots` (refused if unset, because the sender chooses the project path and the receiver must pre-approve allowed parent directories). The reply command inside the handoff card omits the message subject | `project_roots` (array of directories, required) |
 
-Every doorbell accepts an optional `"kinds": ["task", "result"]` filter. Mobile notifications use `command` wired to an existing Telegram script, for example:
+Every doorbell accepts an optional `"kinds": ["task", "result"]` filter and an optional `"min_priority": "high"` threshold (`low` / `normal` / `high`): the bell rings only for mail at or above that priority. Without it every priority rings (the previous behaviour); an invalid value is recorded as that bell's error rather than silencing it. When both are set, both must match. Mobile notifications use `command` wired to an existing Telegram script, for example:
 
 ```json
-{"type": "command", "kinds": ["task", "result"], "argv": ["bash", "C:/Users/<you>/.claude/scripts/telegram-send.sh", "{summary}"]}
+{"type": "command", "kinds": ["task", "result"], "min_priority": "high", "argv": ["bash", "C:/Users/<you>/.claude/scripts/telegram-send.sh", "{summary}"]}
 ```
 
 ## 5. Scheduled Polling (Windows)

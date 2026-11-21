@@ -202,14 +202,40 @@ def ring_dispatch(env: dict, bell: dict) -> str:
 CHANNELS = {"toast": ring_toast, "command": ring_command, "handoff": ring_handoff, "dispatch": ring_dispatch}
 
 
+PRIORITY_RANK = {"low": 0, "normal": 1, "high": 2}
+
+
+def skip_reason(env: dict, bell: dict) -> str | None:
+    """Why this bell stays quiet for this message, or None when it should ring.
+
+    A min_priority the receiver mistyped raises ValueError: a typo must show up as an
+    error, not silently mute (or un-mute) the bell.
+    """
+    wanted = bell.get("kinds")
+    if wanted and env["kind"] not in wanted:
+        return "skipped: kind filter"
+    floor = bell.get("min_priority")
+    if floor is not None:
+        if floor not in PRIORITY_RANK:
+            raise ValueError(f"min_priority must be one of {tuple(PRIORITY_RANK)}, got {floor!r}")
+        if PRIORITY_RANK.get(env.get("priority", "normal"), 1) < PRIORITY_RANK[floor]:
+            return "skipped: priority filter"
+    return None
+
+
 def ring(env: dict, bells: list[dict]) -> dict[str, str]:
     results: dict[str, str] = {}
     for i, bell in enumerate(bells):
         kind = bell.get("type", "")
         name = f"{i}:{kind}"
-        wanted = bell.get("kinds")
-        if wanted and env["kind"] not in wanted:
-            results[name] = "skipped: kind filter"
+        try:
+            reason = skip_reason(env, bell)
+        except ValueError as exc:
+            results[name] = f"error: {exc}"
+            _log(f"ring {env['id']} {name} -> {results[name]}")
+            continue
+        if reason:
+            results[name] = reason
             continue
         channel = CHANNELS.get(kind)
         try:

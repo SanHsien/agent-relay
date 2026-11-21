@@ -99,10 +99,10 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 | `command` | 執行一個指令（不經 shell），參數可用 `{id}` `{from}` `{to}` `{subject}` `{kind}` `{summary}`。**拒絕 `.bat`/`.cmd`**：Windows 會交給 cmd.exe 重新解析參數，信件內文裡的 `&` 會變成指令。值可能以 `-` 開頭，程式若吃選項請在前面放 `--` | `argv`、`timeout`（秒） |
 | `handoff` | `kind=task` 且有 `project` 時，在 `<project>/.claude/handoffs/` 放一張 dropoff/pickup 交接卡（檔名 `relay-<id>.md`，重響不會多一張），下一個 session `/pickup` 就接得到。專案必須在 `project_roots` 底下，沒設就一律拒絕：放卡的位置是寄件人決定的，收件端要先同意哪些資料夾可以放。交接卡裡的回信指令不放信件標題 | `project_roots`（資料夾陣列，必填） |
 
-每個門鈴都可加 `"kinds": ["task", "result"]` 只對某些信響。手機通知用 `command` 接既有的 Telegram 腳本，例如：
+每個門鈴都可加 `"kinds": ["task", "result"]` 只對某些信響，也可加 `"min_priority": "high"`（`low`／`normal`／`high`）只對優先級不低於門檻的信響；沒設就每種優先級都響（和以前一樣），寫錯值會記成該門鈴的錯誤而不是靜默。兩個條件同時設時都要符合。手機通知用 `command` 接既有的 Telegram 腳本，例如：
 
 ```json
-{"type": "command", "kinds": ["task", "result"], "argv": ["bash", "C:/Users/<you>/.claude/scripts/telegram-send.sh", "{summary}"]}
+{"type": "command", "kinds": ["task", "result"], "min_priority": "high", "argv": ["bash", "C:/Users/<you>/.claude/scripts/telegram-send.sh", "{summary}"]}
 ```
 
 ## 5. 輪詢排程（Windows）
