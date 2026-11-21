@@ -332,8 +332,9 @@ TDD      信件 dispatch.tdd: true 或設定 verify.tdd: true 時，在 base com
            base 單獨跑驗證指令 → 必須通過（起點是綠的，否則 tdd-not-proven）
            放進工人新增或修改的測試檔再跑 → 必須失敗（證明重現了問題，否則 tdd-not-proven）
 綠燈     在工人的 worktree 跑驗證指令 → 失敗就 verification-failed
-         跑了 0 個測試（輸出有 unittest 的 `Ran 0 tests` 或 pytest 的 `no tests ran`，或指令是 pytest／unittest
-         且 exit 5）→ unverified：沒有東西被驗證，不算綠燈也不算失敗
+         跑了 0 個測試（行首的 unittest 摘要 `Ran 0 tests in` 或 pytest 的 `=== no tests ran`，而且沒有任何摘要行
+         顯示有測試跑了；或沒有摘要、指令是 pytest／unittest 且 exit 5）→ unverified：沒有東西被驗證，不算綠燈也不算失敗。
+         一次跑多個測試組、其中一組是空的，不會被判成 0 個測試
 紀錄     每次執行的完整終端輸出直接寫進 runs/<id>/verify-base.log、verify-red.log、verify-green.log；
          逾時就結束整棵行程（含孫行程）；回信附指令、exit code、最後 15 行與 log 的 sha256；
          store/audit 記一筆 verify 事件（不含輸出內容）

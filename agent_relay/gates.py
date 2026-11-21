@@ -490,8 +490,12 @@ def run_logged(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> di
             "tail": "\n".join(text.strip().splitlines()[-TAIL_LINES:])}
 
 
-# "Ran 0 tests" is unittest (any version); "no tests ran" is pytest's closing line.
-_ZERO_TESTS = re.compile(r"^(?:Ran 0 tests? in |=*\s*no tests ran\b)", re.MULTILINE | re.IGNORECASE)
+# Summary lines only, anchored at line start: unittest "Ran N tests in", pytest "=== no tests ran in" /
+# "=== 3 passed, 1 skipped in". A run is zero-test only if some summary says empty and none says tests ran,
+# so one empty suite inside a multi-suite run (e.g. a dev_check script) does not void the others.
+_UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
+_PYTEST_EMPTY = re.compile(r"^=+ no tests ran\b", re.MULTILINE | re.IGNORECASE)
+_PYTEST_RAN = re.compile(r"^=+ .*\b\d+ (?:passed|failed|errors?|xfailed|xpassed|skipped)\b.* in [\d.]+s", re.MULTILINE)
 NO_TESTS_EXIT = 5  # pytest, and unittest on Python 3.12+: nothing was collected
 
 
@@ -507,7 +511,10 @@ def ran_zero_tests(run: dict) -> bool:
         text = Path(run["log"]).read_text(encoding="utf-8", errors="replace")
     except (OSError, KeyError):
         text = run.get("tail", "")
-    if _ZERO_TESTS.search(text):
+    counts = [int(n) for n in _UNITTEST_RAN.findall(text)]
+    if any(counts) or _PYTEST_RAN.search(text):
+        return False  # some suite really ran tests
+    if 0 in counts or _PYTEST_EMPTY.search(text):
         return True
     return run.get("exit") == NO_TESTS_EXIT and _names_test_runner(run.get("command", ""))
 

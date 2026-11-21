@@ -330,6 +330,18 @@ class ZeroTestGateTests(unittest.TestCase):
         self.assertEqual(result.status, "ok", result.notes)
         self.assertEqual(self.gate(self.fake("Ran 10 tests in 0.1s\n\nOK", 0)).status, "ok")
 
+    def test_multi_suite_run_with_one_empty_suite_still_passes(self):
+        # e.g. a dev_check that runs two unittest suites, one of which is empty
+        two = "Ran 0 tests in 0.000s\n\nNO TESTS RAN\nRan 42 tests in 3.1s\n\nOK"
+        self.assertEqual(self.gate(self.fake(two, 0)).status, "ok")
+        mixed = "Ran 12 tests in 1.0s\n\nOK\n=========== no tests ran in 0.01s ==========="
+        self.assertEqual(self.gate(self.fake(mixed, 0)).status, "ok")
+        pytest_ok = "=========== no tests ran in 0.01s ===========\n============ 3 passed in 0.20s ============"
+        self.assertEqual(self.gate(self.fake(pytest_ok, 0)).status, "ok")
+
+    def test_ran_0_tests_inside_other_text_is_not_a_summary(self):
+        self.assertEqual(self.gate(self.fake("log: Ran 0 tests in 0s was printed by a fixture", 0)).status, "ok")
+
     def test_exit_5_from_a_non_test_runner_is_still_a_failure(self):
         self.assertEqual(self.gate(self.fake("build broke", 5)).status, "verification-failed")
 
