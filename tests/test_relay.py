@@ -376,6 +376,143 @@ class WatchBatchTests(Base):
                          ["ok", "skipped: priority filter", "skipped: priority filter"])
 
 
+class WatchRetryTests(Base):
+    """R4: a bell that failed is retried later with a bounded count, and only then recorded as rung."""
+
+    def cfg(self, bells):
+        return {"store": str(self.dir / "store"), "agent": "cc", "doorbells": bells}
+
+    def flaky(self, **extra):
+        """A command bell that fails until the 'fixed' file exists; every call is logged."""
+        log, fixed = self.dir / "calls.txt", self.dir / "fixed"
+        code = ("import sys, os; open(sys.argv[1],'a').write('x\\n'); "
+                "sys.exit(0 if os.path.exists(sys.argv[2]) else 1)")
+        return log, fixed, {"type": "command", "argv": [sys.executable, "-c", code, str(log), str(fixed)], **extra}
+
+    def calls(self, log):
+        return len(log.read_text().splitlines()) if log.exists() else 0
+
+    def deliver(self, cfg, subject="s"):
+        env = envelope.build(sender="commander", to="cc", subject=subject, body="")
+        Store(cfg["store"]).deliver(env)
+        return env
+
+    def test_failed_bell_is_not_recorded_as_rung_and_is_retried(self):
+        log, fixed, bell = self.flaky()
+        cfg = self.cfg([bell])
+        env = self.deliver(cfg)
+        first = cli.watch_once("cc", cfg, sync=False, now=1000.0)
+        self.assertTrue(first[0]["bells"]["0:command"].startswith("error"))
+        self.assertEqual(first[0]["retry"], ["0:command"])
+        self.assertNotIn(env["id"], doorbell.load_rung("cc"))
+        fixed.touch()
+        second = cli.watch_once("cc", cfg, sync=False, now=1000.0 + doorbell.DEFAULT_RETRY_BACKOFF_S)
+        self.assertEqual(second[0]["bells"], {"0:command": "ok"})
+        self.assertIn(env["id"], doorbell.load_rung("cc"))
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=10_000.0), [])
+        self.assertEqual(self.calls(log), 2)
+
+    def test_retry_waits_for_backoff(self):
+        log, _, bell = self.flaky()
+        cfg = self.cfg([bell])
+        self.deliver(cfg)
+        cli.watch_once("cc", cfg, sync=False, now=1000.0)
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=1001.0), [])  # too soon: nothing rings
+        self.assertEqual(self.calls(log), 1)
+
+    def test_backoff_doubles(self):
+        log, _, bell = self.flaky(retries=3, retry_backoff_seconds=10)
+        cfg = self.cfg([bell])
+        self.deliver(cfg)
+        cli.watch_once("cc", cfg, sync=False, now=0.0)       # fail 1, next at 10
+        cli.watch_once("cc", cfg, sync=False, now=10.0)      # fail 2, next at 30
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=29.0), [])
+        cli.watch_once("cc", cfg, sync=False, now=30.0)      # fail 3
+        self.assertEqual(self.calls(log), 3)
+
+    def test_only_the_failed_bell_is_rung_again(self):
+        ok_log = self.dir / "ok.txt"
+        ok_bell = {"type": "command", "argv": [sys.executable, "-c", "import sys; open(sys.argv[1],'a').write('x\\n')", str(ok_log)]}
+        _, fixed, bad = self.flaky()
+        cfg = self.cfg([ok_bell, bad])
+        self.deliver(cfg)
+        cli.watch_once("cc", cfg, sync=False, now=0.0)
+        fixed.touch()
+        again = cli.watch_once("cc", cfg, sync=False, now=10_000.0)
+        self.assertEqual(again[0]["bells"], {"1:command": "ok"})
+        self.assertEqual(self.calls(ok_log), 1)  # the bell that worked does not ring twice
+
+    def test_permanent_failure_is_surfaced_then_recorded(self):
+        log, _, bell = self.flaky(retries=1)
+        cfg = self.cfg([bell])
+        env = self.deliver(cfg)
+        cli.watch_once("cc", cfg, sync=False, now=0.0)
+        last = cli.watch_once("cc", cfg, sync=False, now=10_000.0)
+        self.assertEqual(last[0]["gave_up"], ["0:command"])
+        self.assertNotIn("retry", last[0])
+        self.assertIn(env["id"], doorbell.load_rung("cc"))
+        self.assertIn("gave up", (self.dir / "home" / "relay.log").read_text(encoding="utf-8"))
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=99_999.0), [])
+        self.assertEqual(self.calls(log), 2)
+
+    def test_retries_zero_keeps_the_old_record_on_first_try(self):
+        _, _, bell = self.flaky(retries=0)
+        cfg = self.cfg([bell])
+        env = self.deliver(cfg)
+        entry = cli.watch_once("cc", cfg, sync=False, now=0.0)[0]
+        self.assertNotIn("retry", entry)
+        self.assertIn(env["id"], doorbell.load_rung("cc"))
+
+    def test_dispatch_bell_is_never_retried(self):
+        def broken(env, bell):
+            raise RuntimeError("boom")
+
+        cfg = self.cfg([{"type": "dispatch"}])
+        env = self.deliver(cfg)
+        with mock.patch.dict(doorbell.CHANNELS, {"dispatch": broken}):
+            entry = cli.watch_once("cc", cfg, sync=False, now=0.0)[0]
+        self.assertNotIn("retry", entry)
+        self.assertIn(env["id"], doorbell.load_rung("cc"))  # dispatch keeps its own run state; re-ringing could start a second worker
+
+    def test_retry_state_is_dropped_once_the_mail_leaves_new(self):
+        _, _, bell = self.flaky()
+        cfg = self.cfg([bell])
+        env = self.deliver(cfg)
+        cli.watch_once("cc", cfg, sync=False, now=0.0)
+        Store(cfg["store"]).ack("cc", env["id"])
+        self.assertEqual(cli.watch_once("cc", cfg, sync=False, now=10_000.0), [])
+        self.assertEqual(doorbell.load_retry("cc"), {})
+
+    def test_failed_batch_is_retried_for_every_mail_in_it(self):
+        toasts = []
+
+        def toast(env, bell):
+            toasts.append(env)
+            if len(toasts) == 1:
+                raise RuntimeError("notification service down")
+            return "ok"
+
+        cfg = self.cfg([{"type": "toast"}])
+        a, b = self.deliver(cfg, "a"), self.deliver(cfg, "b")
+        with mock.patch.dict(doorbell.CHANNELS, {"toast": toast}):
+            first = cli.watch_once("cc", cfg, sync=False, now=0.0)
+            self.assertEqual([e.get("retry") for e in first], [["0:toast"], ["0:toast"]])
+            cli.watch_once("cc", cfg, sync=False, now=10_000.0)
+        self.assertEqual(len(toasts), 2)
+        self.assertEqual(toasts[1]["count"], 2)  # the retry is one summary again, not two toasts
+        self.assertEqual(sorted(doorbell.load_rung("cc")), sorted([a["id"], b["id"]]))
+
+    def test_auto_handling_runs_once_across_retries(self):
+        _, fixed, bell = self.flaky()
+        cfg = self.cfg([bell])
+        self.deliver(cfg)
+        with mock.patch.object(cli, "automate", return_value="did it") as auto:
+            cli.watch_once("cc", cfg, sync=False, now=0.0)
+            fixed.touch()
+            cli.watch_once("cc", cfg, sync=False, now=10_000.0)
+        self.assertEqual(auto.call_count, 1)
+
+
 class PollerTests(unittest.TestCase):
     def test_task_xml(self):
         xml = poller.build_task_xml("hermes", 5, r"C:\Python\pythonw.exe", r"C:\relay")

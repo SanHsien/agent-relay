@@ -91,6 +91,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 - `relay watch --once`：pull 後，對 `new/` 裡這台機器還沒響過的每封信，依序按設定的每個門鈴。響過的 id 記在 `~/.agent-relay/rung-<agent>.json`（每台機器各自記，不進 git）。**每響完一封就存一次，而且要原子寫入**（暫存檔再改名）：中途被砍掉的那一輪，下次不會把已響過的全部重響。
 - 一個門鈴壞掉要記錄錯誤、繼續按下一個。
+- **失敗的門鈴稍後補響，有次數上限**：某封信有門鈴回錯誤時，這封信先不記進已響清單，失敗的門鈴（只有它們，響成功的不重響）記在 `~/.agent-relay/ring-retry-<agent>.json`，等 `retry_backoff_seconds`（預設 60 秒，每次加倍）之後的下一輪再響，最多再試 `retries` 次（預設 3）。全部成功或用完次數才記成已響；用完次數時 `relay.log` 寫 `gave up after N attempts`，`watch` 回報那封信帶 `gave_up`（文字輸出寫 `GAVE UP` 並在 stderr 提醒），還在等的帶 `retry`。`retries: 0` 等於舊行為（失敗一次就記成已響）。只有 `toast`、`command`、`handoff` 會補響；`dispatch` 不補響，它有自己的執行紀錄，重響可能多開一個工人。自動處理（第 18 節）每封信只做一次，不隨補響重做。信件在補響前被 `ack` 或離開 `new/`，補響紀錄就丟掉。
 - **同一輪多封新信合併成一則**：門鈴設 `"batch": true` 時，這一輪通過它過濾條件的信若有兩封以上，只響一次，摘要是「`[agent-relay] <封數> new -> <信箱>: <寄件者> (<種類>): <標題>; …`」，最多列 5 封、每個標題截到 60 字、整則截到 300 字，超過的寫 `+N more`。只有一封時照舊逐封響。`toast` 預設合併（只給人看，沒有程式解析）；`command` 預設不合併，因為既有腳本的 `argv` 可能用 `{id}`、`{subject}` 指名單一封信，要合併得明寫 `"batch": true`，此時 `{count}` 是封數、`{summary}` 是摘要、`{id}` 是逗號分隔的 id；`toast` 要逐封響就寫 `"batch": false`。`handoff`、`dispatch` 一律逐封處理。合併的門鈴在這一輪逐封處理之前先響；那一輪中途被砍掉時，還沒存進已響清單的信下一輪會再出現在摘要裡。`watch` 的回報仍是一封信一筆。
 - 內建三種：
 

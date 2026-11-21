@@ -530,8 +530,13 @@ def cmd_sync(args, cfg) -> int:
     return 0
 
 
-def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
-    """Ring for every message in new/ that this machine has not rung yet."""
+def watch_once(agent: str, cfg: dict, sync: bool = True, now: float | None = None) -> list[dict]:
+    """Ring for every message in new/ that this machine has not rung yet.
+
+    A message counts as rung once every bell has succeeded, been skipped, or used up
+    its retries (SPEC 4); until then only its failed bells ring again, after a backoff.
+    """
+    now = time.time() if now is None else now
     if sync:
         gitsync.pull(Path(cfg["store"]))
     rung = doorbell.load_rung(agent)
@@ -543,22 +548,55 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
     bells = cfg["doorbells"]
     names = [doorbell.bell_name(i, bell) for i, bell in enumerate(bells)]
-    # Several mails in one tick: human-facing bells ring once with a summary (SPEC 4).
-    batched = doorbell.ring_batched(fresh, bells, agent) if len(fresh) > 1 else {}
-    report = []
+    stored = doorbell.load_retry(agent)
+    # Mail that left new/ (acked, or rung by a run cut short) needs no retry: forget it.
+    pending = {env["id"]: stored[env["id"]] for env in fresh if isinstance(stored.get(env["id"]), dict)}
+    if pending != stored:
+        doorbell.save_retry(agent, pending)
+    due: dict[str, set[str]] = {}
     for env in fresh:
+        if env["id"] not in pending:
+            due[env["id"]] = set(names)
+            continue
+        waiting = {n: s for n, s in pending[env["id"]].items() if n in names and isinstance(s, dict)}
+        ready = {n for n, s in waiting.items() if float(s.get("next_at", 0)) <= now}
+        if ready or not waiting:  # nothing left to wait for (bells reconfigured): settle it now
+            due[env["id"]] = ready
+    work = [env for env in fresh if env["id"] in due]
+    # Several mails in one tick: human-facing bells ring once with a summary (SPEC 4).
+    batched = doorbell.ring_batched(work, bells, agent, due) if len(work) > 1 else {}
+    report = []
+    for env in work:
+        retrying = env["id"] in pending
         done = {name: result for (env_id, name), result in batched.items() if env_id == env["id"]}
-        rest = [name for name in names if name not in done]
-        rang = doorbell.ring(env, bells) if not done else doorbell.ring(env, bells, only=set(rest)) if rest else {}
+        rest = due[env["id"]] - set(done)
+        if not done and not retrying:
+            rang = doorbell.ring(env, bells)
+        else:
+            rang = doorbell.ring(env, bells, only=rest) if rest else {}
         rang.update(done)
         entry = {"id": env["id"], "subject": env["subject"], "bells": {name: rang[name] for name in names if name in rang}}
-        auto = automate(env, agent, cfg)
-        if auto:
-            entry["auto"] = auto
-            doorbell._log(f"auto {env['id']} -> {auto}")
+        if not retrying:  # automatic handling happens once per mail, not once per ring attempt
+            auto = automate(env, agent, cfg)
+            if auto:
+                entry["auto"] = auto
+                doorbell._log(f"auto {env['id']} -> {auto}")
+        previous = pending.get(env["id"], {})
+        still, gave_up = doorbell.settle(env["id"], entry["bells"], bells, previous, now)
+        # Bells not due this tick keep waiting with their old state.
+        still.update({n: s for n, s in previous.items() if n in names and n not in due[env["id"]]})
+        if gave_up:
+            entry["gave_up"] = gave_up
         report.append(entry)
-        rung.append(env["id"])
-        doorbell.save_rung(agent, rung)  # per message: a run cut short does not re-ring the rest
+        if still:
+            entry["retry"] = sorted(still)
+            pending[env["id"]] = still
+        else:
+            pending.pop(env["id"], None)
+            rung.append(env["id"])
+            doorbell.save_rung(agent, rung)  # per message: a run cut short does not re-ring the rest
+        if still or retrying:
+            doorbell.save_retry(agent, pending)
     if relay_status.heartbeat(cfg, agent) and sync:
         gitsync.sync(Path(cfg["store"]), f"relay: {agent} heartbeat")
     return report
@@ -648,7 +686,13 @@ def cmd_watch(args, cfg) -> int:
                 return 1
             report = []
         if report or args.once:
-            _out(args, report, "\n".join(f"rang {r['id']} {r['subject']} {r['bells']}" for r in report) or "no new mail")
+            _out(args, report, "\n".join(
+                f"rang {r['id']} {r['subject']} {r['bells']}"
+                + (f" retry later: {', '.join(r['retry'])}" if r.get("retry") else "")
+                + (f" GAVE UP: {', '.join(r['gave_up'])}" if r.get("gave_up") else "")
+                for r in report) or "no new mail")
+            if any(r.get("gave_up") for r in report):
+                print("doorbell gave up after its retries; see relay.log", file=sys.stderr)
         if args.once:
             return 0
         time.sleep(args.interval)

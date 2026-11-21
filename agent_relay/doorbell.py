@@ -305,8 +305,11 @@ def ring(env: dict, bells: list[dict], only: set[str] | None = None) -> dict[str
     return results
 
 
-def ring_batched(envs: list[dict], bells: list[dict], to: str) -> dict[tuple[str, str], str]:
+def ring_batched(envs: list[dict], bells: list[dict], to: str,
+                 due: dict[str, set[str]] | None = None) -> dict[tuple[str, str], str]:
     """For each batching bell, ring once for all mails that pass its filters.
+
+    `due` limits each mail to the bells that should ring for it this tick (retries).
 
     Returns {(mail id, bell name): result} for the pairs it decided. A bell left with
     a single mail is not decided here, so that mail rings exactly as it used to.
@@ -317,7 +320,8 @@ def ring_batched(envs: list[dict], bells: list[dict], to: str) -> dict[tuple[str
             continue
         name = bell_name(i, bell)
         group = []
-        for env in envs:
+        considered = [env for env in envs if due is None or name in due.get(env["id"], ())]
+        for env in considered:
             try:
                 reason = skip_reason(env, bell)
             except ValueError as exc:
@@ -327,7 +331,7 @@ def ring_batched(envs: list[dict], bells: list[dict], to: str) -> dict[tuple[str
             else:
                 group.append(env)
         if len(group) < 2:
-            for env in envs:
+            for env in considered:
                 decided.pop((env["id"], name), None)
             continue
         result = ring_one(batch_envelope(group, to), name, bell)
@@ -347,16 +351,78 @@ def load_rung(agent: str) -> list[str]:
         return []
 
 
-def save_rung(agent: str, ids: list[str]) -> None:
-    """Atomic: a run cut off mid-write must not forget everything and re-ring it all."""
-    path = _rung_path(agent)
+def _write_atomic(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".rung-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(ids[-KEEP_RUNG:]))
+            fh.write(json.dumps(data))
         os.replace(tmp, path)
     except BaseException:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def save_rung(agent: str, ids: list[str]) -> None:
+    """Atomic: a run cut off mid-write must not forget everything and re-ring it all."""
+    _write_atomic(_rung_path(agent), ids[-KEEP_RUNG:])
+
+
+# ---------------------------------------------------------------- retrying failed bells
+
+RETRYABLE = ("toast", "command", "handoff")  # dispatch keeps its own run state; a re-ring could start a 2nd worker
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_BACKOFF_S = 60
+
+
+def retry_policy(bell: dict) -> tuple[int, int]:
+    """(extra attempts after the first failure, first backoff in seconds); doubles each time."""
+    if bell.get("type") not in RETRYABLE:
+        return 0, DEFAULT_RETRY_BACKOFF_S
+    retries = bell.get("retries", DEFAULT_RETRIES)
+    backoff = bell.get("retry_backoff_seconds", DEFAULT_RETRY_BACKOFF_S)
+    if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+        retries = DEFAULT_RETRIES
+    if not isinstance(backoff, (int, float)) or isinstance(backoff, bool) or backoff <= 0:
+        backoff = DEFAULT_RETRY_BACKOFF_S
+    return retries, backoff
+
+
+def _retry_path(agent: str) -> Path:
+    return config.home() / f"ring-retry-{agent}.json"
+
+
+def load_retry(agent: str) -> dict:
+    """{mail id: {bell name: {"attempts", "next_at", "error"}}} for bells still to be retried."""
+    try:
+        data = json.loads(_retry_path(agent).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_retry(agent: str, pending: dict) -> None:
+    _write_atomic(_retry_path(agent), pending)
+
+
+def settle(env_id: str, results: dict[str, str], bells: list[dict], previous: dict, now: float) -> tuple[dict, list[str]]:
+    """Which failed bells of one mail ring again later, and which have given up for good.
+
+    Returns (still pending {bell name: state}, bell names that gave up). Bells that
+    succeeded, were skipped, or are not retryable drop out.
+    """
+    by_name = {bell_name(i, bell): bell for i, bell in enumerate(bells)}
+    pending: dict = {}
+    gave_up: list[str] = []
+    for name, result in results.items():
+        if not result.startswith("error") or name not in by_name:
+            continue
+        retries, backoff = retry_policy(by_name[name])
+        attempts = int((previous.get(name) or {}).get("attempts", 0)) + 1
+        if attempts <= retries:
+            pending[name] = {"attempts": attempts, "next_at": now + backoff * 2 ** (attempts - 1), "error": result}
+        elif retries:
+            gave_up.append(name)
+            _log(f"ring {env_id} {name} gave up after {attempts} attempts: {result}")
+    return pending, gave_up
