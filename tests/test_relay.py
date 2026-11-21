@@ -281,6 +281,101 @@ class DoorbellTests(Base):
         self.assertEqual(out.read_text(), "x; rm -rf /")
 
 
+class WatchBatchTests(Base):
+    """R2: several mails in one tick ring a human-facing bell once, with a short summary."""
+
+    def setUp(self):
+        super().setUp()
+        self.toasts = []
+        patch = mock.patch.dict(doorbell.CHANNELS, {"toast": lambda env, bell: self.toasts.append(env) or "ok"})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def cfg(self, bells):
+        return {"store": str(self.dir / "store"), "agent": "cc", "doorbells": bells}
+
+    def deliver(self, cfg, *subjects, **kw):
+        envs = [envelope.build(sender="commander", to="cc", subject=s, body="", **kw) for s in subjects]
+        for env in envs:
+            Store(cfg["store"]).deliver(env)
+        return envs
+
+    def recorder(self, **extra):
+        log = self.dir / "rang.txt"
+        argv = [sys.executable, "-c", "import sys; open(sys.argv[1],'a',encoding='utf-8').write(' '.join(sys.argv[2:])+'\\n')",
+                str(log), "{count}", "{summary}"]
+        return log, {"type": "command", "argv": argv, **extra}
+
+    def test_three_mails_ring_one_toast_naming_all_of_them(self):
+        cfg = self.cfg([{"type": "toast"}])
+        self.deliver(cfg, "alpha", "beta", "gamma")
+        report = cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual(len(self.toasts), 1)
+        text = doorbell.summary(self.toasts[0])
+        self.assertIn("3", text)
+        for subject in ("alpha", "beta", "gamma"):
+            self.assertIn(subject, text)
+        self.assertEqual([r["bells"]["0:toast"] for r in report], ["ok"] * 3)  # report stays one entry per mail
+        self.assertEqual(len(doorbell.load_rung("cc")), 3)
+
+    def test_a_single_mail_rings_exactly_as_before(self):
+        cfg = self.cfg([{"type": "toast"}])
+        (env,) = self.deliver(cfg, "solo")
+        cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual([t["id"] for t in self.toasts], [env["id"]])
+        self.assertEqual(doorbell.summary(self.toasts[0]), doorbell.summary(env))
+
+    def test_command_bell_rings_per_mail_unless_batch_is_set(self):
+        log, bell = self.recorder()
+        cfg = self.cfg([bell])
+        self.deliver(cfg, "one", "two")
+        cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 2)  # {id}-style consumers keep working
+
+    def test_command_batch_opt_in_fills_count_and_summary(self):
+        log, bell = self.recorder(batch=True)
+        cfg = self.cfg([bell])
+        self.deliver(cfg, "one", "two")
+        cli.watch_once("cc", cfg, sync=False)
+        lines = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].startswith("2 "), lines)
+        self.assertIn("one", lines[0])
+        self.assertIn("two", lines[0])
+
+    def test_toast_batch_false_restores_one_toast_per_mail(self):
+        cfg = self.cfg([{"type": "toast", "batch": False}])
+        self.deliver(cfg, "a", "b")
+        cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual(len(self.toasts), 2)
+
+    def test_batch_summary_is_truncated(self):
+        cfg = self.cfg([{"type": "toast"}])
+        self.deliver(cfg, *[f"subject number {i} " + "x" * 200 for i in range(12)])
+        cli.watch_once("cc", cfg, sync=False)
+        text = doorbell.summary(self.toasts[0])
+        self.assertLessEqual(len(text), doorbell.BATCH_SUMMARY_MAX)
+        self.assertIn("12", text)
+        self.assertIn("more", text)
+
+    def test_handoff_is_never_batched(self):
+        project = self.dir / "proj"
+        project.mkdir()
+        cfg = self.cfg([{"type": "handoff", "project_roots": [str(self.dir)], "batch": True}])
+        self.deliver(cfg, "t1", "t2", kind="task", project=str(project))
+        cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual(len(list((project / ".claude" / "handoffs").glob("*.md"))), 2)
+
+    def test_filters_apply_before_batching(self):
+        cfg = self.cfg([{"type": "toast", "min_priority": "high"}])
+        self.deliver(cfg, "noise1", "noise2")
+        (urgent,) = self.deliver(cfg, "urgent", priority="high")
+        report = cli.watch_once("cc", cfg, sync=False)
+        self.assertEqual([t["id"] for t in self.toasts], [urgent["id"]])
+        self.assertEqual(sorted(r["bells"]["0:toast"] for r in report),
+                         ["ok", "skipped: priority filter", "skipped: priority filter"])
+
+
 class PollerTests(unittest.TestCase):
     def test_task_xml(self):
         xml = poller.build_task_xml("hermes", 5, r"C:\Python\pythonw.exe", r"C:\relay")

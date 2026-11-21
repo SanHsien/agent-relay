@@ -91,12 +91,13 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 
 - `relay watch --once`：pull 後，對 `new/` 裡這台機器還沒響過的每封信，依序按設定的每個門鈴。響過的 id 記在 `~/.agent-relay/rung-<agent>.json`（每台機器各自記，不進 git）。**每響完一封就存一次，而且要原子寫入**（暫存檔再改名）：中途被砍掉的那一輪，下次不會把已響過的全部重響。
 - 一個門鈴壞掉要記錄錯誤、繼續按下一個。
+- **同一輪多封新信合併成一則**：門鈴設 `"batch": true` 時，這一輪通過它過濾條件的信若有兩封以上，只響一次，摘要是「`[agent-relay] <封數> new -> <信箱>: <寄件者> (<種類>): <標題>; …`」，最多列 5 封、每個標題截到 60 字、整則截到 300 字，超過的寫 `+N more`。只有一封時照舊逐封響。`toast` 預設合併（只給人看，沒有程式解析）；`command` 預設不合併，因為既有腳本的 `argv` 可能用 `{id}`、`{subject}` 指名單一封信，要合併得明寫 `"batch": true`，此時 `{count}` 是封數、`{summary}` 是摘要、`{id}` 是逗號分隔的 id；`toast` 要逐封響就寫 `"batch": false`。`handoff`、`dispatch` 一律逐封處理。合併的門鈴在這一輪逐封處理之前先響；那一輪中途被砍掉時，還沒存進已響清單的信下一輪會再出現在摘要裡。`watch` 的回報仍是一封信一筆。
 - 內建三種：
 
 | type | 做什麼 | 設定 |
 | --- | --- | --- |
 | `toast` | Windows 右下角通知（WinRT，免安裝模組） | 無 |
-| `command` | 執行一個指令（不經 shell），參數可用 `{id}` `{from}` `{to}` `{subject}` `{kind}` `{summary}`。**拒絕 `.bat`/`.cmd`**：Windows 會交給 cmd.exe 重新解析參數，信件內文裡的 `&` 會變成指令。值可能以 `-` 開頭，程式若吃選項請在前面放 `--` | `argv`、`timeout`（秒） |
+| `command` | 執行一個指令（不經 shell），參數可用 `{id}` `{from}` `{to}` `{subject}` `{kind}` `{summary}` `{count}`（單封時是 1）。**拒絕 `.bat`/`.cmd`**：Windows 會交給 cmd.exe 重新解析參數，信件內文裡的 `&` 會變成指令。值可能以 `-` 開頭，程式若吃選項請在前面放 `--` | `argv`、`timeout`（秒） |
 | `handoff` | `kind=task` 且有 `project` 時，在 `<project>/.claude/handoffs/` 放一張 dropoff/pickup 交接卡（檔名 `relay-<id>.md`，重響不會多一張），下一個 session `/pickup` 就接得到。專案必須在 `project_roots` 底下，沒設就一律拒絕：放卡的位置是寄件人決定的，收件端要先同意哪些資料夾可以放。交接卡裡的回信指令不放信件標題 | `project_roots`（資料夾陣列，必填） |
 
 每個門鈴都可加 `"kinds": ["task", "result"]` 只對某些信響，也可加 `"min_priority": "high"`（`low`／`normal`／`high`）只對優先級不低於門檻的信響；沒設就每種優先級都響（和以前一樣），寫錯值會記成該門鈴的錯誤而不是靜默。兩個條件同時設時都要符合。手機通知用 `command` 接既有的 Telegram 腳本，例如：

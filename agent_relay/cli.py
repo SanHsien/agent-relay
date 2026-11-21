@@ -541,9 +541,17 @@ def watch_once(agent: str, cfg: dict, sync: bool = True) -> list[dict]:
     if reaped and sync:  # push the replies now rather than on the next send
         gitsync.sync(Path(cfg["store"]), f"relay: {agent} reaped {len(reaped)} interrupted dispatch")
     fresh = [env for state, env in Store(cfg["store"]).list(agent, ("new",)) if env["id"] not in rung]
+    bells = cfg["doorbells"]
+    names = [doorbell.bell_name(i, bell) for i, bell in enumerate(bells)]
+    # Several mails in one tick: human-facing bells ring once with a summary (SPEC 4).
+    batched = doorbell.ring_batched(fresh, bells, agent) if len(fresh) > 1 else {}
     report = []
     for env in fresh:
-        entry = {"id": env["id"], "subject": env["subject"], "bells": doorbell.ring(env, cfg["doorbells"])}
+        done = {name: result for (env_id, name), result in batched.items() if env_id == env["id"]}
+        rest = [name for name in names if name not in done]
+        rang = doorbell.ring(env, bells) if not done else doorbell.ring(env, bells, only=set(rest)) if rest else {}
+        rang.update(done)
+        entry = {"id": env["id"], "subject": env["subject"], "bells": {name: rang[name] for name in names if name in rang}}
         auto = automate(env, agent, cfg)
         if auto:
             entry["auto"] = auto

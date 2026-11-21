@@ -5,7 +5,7 @@ is best-effort: one failing channel is logged and the others still ring.
 
 Channels
   toast    Windows toast through the built-in WinRT API (no module to install)
-  command  run an argv list with {id} {from} {to} {subject} {kind} {summary}
+  command  run an argv list with {id} {from} {to} {subject} {kind} {summary} {count}
            filled in; no shell. .bat/.cmd programs are refused because cmd.exe
            would re-parse mail text. A value may start with "-", so put it
            after "--" if the program takes options.
@@ -42,7 +42,15 @@ $app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell
 """
 
 
+HUMAN_BELLS = ("toast", "command")  # the only bells a batch summary makes sense for
+BATCH_SUMMARY_MAX = 300
+BATCH_SUBJECT_MAX = 60
+BATCH_LIST_MAX = 5
+
+
 def summary(env: dict) -> str:
+    if env.get("batch_summary"):
+        return env["batch_summary"]
     return f"[agent-relay] {env['from']} -> {env['to']} ({env['kind']}): {env['subject']}"
 
 
@@ -54,6 +62,42 @@ def fields(env: dict) -> dict:
         "subject": env["subject"],
         "kind": env["kind"],
         "summary": summary(env),
+        "count": str(env.get("count", 1)),
+    }
+
+
+def batches(bell: dict) -> bool:
+    """Whether this bell rings once per watch tick instead of once per mail.
+
+    On by default only for toast: it is read by a person and nothing parses it. A
+    command bell's argv may use {id} or {subject} for one specific mail, so merging
+    there would change what an existing script receives; it batches only on request.
+    handoff and dispatch act on each mail and never batch.
+    """
+    kind = bell.get("type", "")
+    return kind in HUMAN_BELLS and bool(bell.get("batch", kind == "toast"))
+
+
+def _cut(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def batch_envelope(envs: list[dict], to: str) -> dict:
+    """A stand-in envelope for one ring covering several mails; summary() gives the short text."""
+    listed = "; ".join(f"{e['from']} ({e['kind']}): {_cut(e['subject'], BATCH_SUBJECT_MAX)}"
+                       for e in envs[:BATCH_LIST_MAX])
+    more = f"; +{len(envs) - BATCH_LIST_MAX} more" if len(envs) > BATCH_LIST_MAX else ""
+    tail = f" -> {to}: {listed}"
+    head = f"[agent-relay] {len(envs)} new"
+    text = head + _cut(tail, BATCH_SUMMARY_MAX - len(head) - len(more)) + more
+    return {
+        "id": ",".join(e["id"] for e in envs),
+        "from": ",".join(dict.fromkeys(e["from"] for e in envs)),
+        "to": to,
+        "subject": _cut(" | ".join(e["subject"] for e in envs), BATCH_SUMMARY_MAX),
+        "kind": ",".join(dict.fromkeys(e["kind"] for e in envs)),
+        "count": len(envs),
+        "batch_summary": text,
     }
 
 
@@ -223,11 +267,31 @@ def skip_reason(env: dict, bell: dict) -> str | None:
     return None
 
 
-def ring(env: dict, bells: list[dict]) -> dict[str, str]:
+def bell_name(i: int, bell: dict) -> str:
+    return f"{i}:{bell.get('type', '')}"
+
+
+def ring_one(env: dict, name: str, bell: dict) -> str:
+    """Ring one bell for one envelope (real or batch_envelope); never raises."""
+    kind = bell.get("type", "")
+    channel = CHANNELS.get(kind)
+    try:
+        if channel is None:
+            raise ValueError(f"unknown doorbell type {kind!r}")
+        result = channel(env, bell)
+    except Exception as exc:  # one broken bell must not silence the rest
+        result = f"error: {exc}"
+    _log(f"ring {env['id']} {name} -> {result}")
+    return result
+
+
+def ring(env: dict, bells: list[dict], only: set[str] | None = None) -> dict[str, str]:
+    """Ring every bell (or only the named ones) for one message."""
     results: dict[str, str] = {}
     for i, bell in enumerate(bells):
-        kind = bell.get("type", "")
-        name = f"{i}:{kind}"
+        name = bell_name(i, bell)
+        if only is not None and name not in only:
+            continue
         try:
             reason = skip_reason(env, bell)
         except ValueError as exc:
@@ -237,15 +301,39 @@ def ring(env: dict, bells: list[dict]) -> dict[str, str]:
         if reason:
             results[name] = reason
             continue
-        channel = CHANNELS.get(kind)
-        try:
-            if channel is None:
-                raise ValueError(f"unknown doorbell type {kind!r}")
-            results[name] = channel(env, bell)
-        except Exception as exc:  # one broken bell must not silence the rest
-            results[name] = f"error: {exc}"
-        _log(f"ring {env['id']} {name} -> {results[name]}")
+        results[name] = ring_one(env, name, bell)
     return results
+
+
+def ring_batched(envs: list[dict], bells: list[dict], to: str) -> dict[tuple[str, str], str]:
+    """For each batching bell, ring once for all mails that pass its filters.
+
+    Returns {(mail id, bell name): result} for the pairs it decided. A bell left with
+    a single mail is not decided here, so that mail rings exactly as it used to.
+    """
+    decided: dict[tuple[str, str], str] = {}
+    for i, bell in enumerate(bells):
+        if not batches(bell):
+            continue
+        name = bell_name(i, bell)
+        group = []
+        for env in envs:
+            try:
+                reason = skip_reason(env, bell)
+            except ValueError as exc:
+                reason = f"error: {exc}"
+            if reason:
+                decided[(env["id"], name)] = reason
+            else:
+                group.append(env)
+        if len(group) < 2:
+            for env in envs:
+                decided.pop((env["id"], name), None)
+            continue
+        result = ring_one(batch_envelope(group, to), name, bell)
+        for env in group:
+            decided[(env["id"], name)] = result
+    return decided
 
 
 def _rung_path(agent: str) -> Path:

@@ -140,7 +140,8 @@ class RungTests(Base):
     """Finding 6: rung is saved per message and atomically."""
 
     def test_saved_after_each_message(self):
-        cfg = {"store": str(self.dir / "store"), "agent": "cc", "doorbells": [{"type": "toast"}]}
+        # batch: False keeps the per-message ring path this test is about (a batched toast rings once up front).
+        cfg = {"store": str(self.dir / "store"), "agent": "cc", "doorbells": [{"type": "toast", "batch": False}]}
         store = Store(cfg["store"])
         first = envelope.build(sender="a", to="cc", subject="1", body="")
         second = envelope.build(sender="a", to="cc", subject="2", body="")
