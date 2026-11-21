@@ -6,6 +6,7 @@
 ## 現況
 決策問答 T-20261114-05 的選項代號驗證、整批回答預檢與已結案保護已提交為 `88addb6`；依整合者沙盒外驗收回報，Python 3.14 與 3.11 各 481 tests OK、doc parity PASS、links 0 broken、mutation 21/21 killed。第二輪小修補上單行 note、Unicode `Cf` 代號拒絕與兩項 mutation 回歸；驗證範圍見 [修正證據](docs/evidence/2026-11-14-question-fixes.md)。協定與操作流程見 `SPEC.md` 第 1 節。
 2026-11-20 store 同步鎖卡 5 分鐘已修：Windows 上等待者 `read_text` 鎖檔的瞬間，持有者的 `unlink` 會 WinError 32，`gitsync._release` 吞掉例外後鎖檔留著；`read` 的 pull 留下鎖，接著自己的 sync 等自己 `LOCK_WAIT_S`（300 s）。現在 `_release` 遇 `PermissionError` 重試最多 5 秒，`_acquire` 把寫著自己 pid 的鎖當殘留處理；回歸測試在 `tests/test_locks.py` `SyncLockTests`。
+2026-11-21 門鈴與閘門補強（依 ai-inbox `docs/always-on-relay-gap-check.md` §4 與 `docs/ccc-mcp-architecture-review.md` §5 逐項對照程式後實作）：門鈴 `min_priority` 門檻（R1）、同一輪多封合併摘要（R2，toast 預設合併、command 要明寫 `batch`）、失敗門鈴補響有上限與退避（R4）、驗證指令跑 0 個測試回 `unverified`（不是 `ok`）；規則見 `SPEC.md` 第 4、11 節。R3、R5–R9 列在中期。
 多 Agent 寄信、派工、回報的協定（`SPEC.md`）與參考 CLI（`python -m agent_relay`），file＋git mailbox，Windows 原生；功能與實測紀錄對照見 `README.md:77-99`。2026-10-29 查：open issue／PR 0，Dependabot 與 code scanning open 0，`main` 上 CI、CodeQL、Dependency freshness 最近一次皆 success，從未發過 release（2026-10-29 `gh release list -R SanHsien/agent-relay`、`gh run list -R SanHsien/agent-relay -b main`）。維護者 2026-10-27 Antigravity 個人訂閱政策已落實：`--run agy` 工人與 `dispatch.default=agy` 已明確依政策拒絕，`advise` 路由已移除 agy，Antigravity 派法統一走 Desktop App 會話（`python -m agent_relay send --to antigravity --kind task --subject <主旨> --project <repo> --ref antigravity-session:new`）。
 
 ## 近期：可以直接動手
@@ -21,6 +22,12 @@
 | `repo_id` 正規化 `ssh://git@host/x/y` 與 `git@host:x/y` 為同一 id | 實際出現兩台機器用不同 remote 寫法導致鎖或 claim 對不上 | 新測試：兩種寫法算出相同 id；舊 claim 的相容讀取有測試 | Claude Opus | `agent_relay/locks.py:120` |
 | 查明 2026-11-20 約 19:10 sidecar（`agent_relay.antigravity`）持有同步鎖、擋住寄信的原因 | 修好 `_release` 後，仍再次出現「存活、沒有 git 子行程、不是自己」的行程持鎖超過 `LOCK_WAIT_S` | 當下記錄鎖檔內容與 mtime、持鎖行程命令列與 Python stack；定位後補重現測試再修 | Claude Opus | `agent_relay/gitsync.py`（`_release`、`_acquire`）；`agent_relay/antigravity.py:42`、`:126` |
 | 收掉 gitsync 剩下的窄競態（第三位等待者在搬走與放回之間建鎖） | 實際出現雙寫入 | 有重現測試，修後通過；與 `locks._LocalLock` 採同一做法 | Claude Opus | `agent_relay/gitsync.py`；`agent_relay/locks.py` |
+| R3 自動結案的通知信（`accepted:`／`rejected:` note）不響門鈴：把 `automate()` 的判斷移到按門鈴之前，或讓這類信只寫 log | 指揮者 home 加了手機 `command` 門鈴，或 toast 被這類信洗版到維護者抱怨 | 新測試：`auto_ack_notes` 開著時這類信不呼叫任何對人門鈴、仍被 ack；關掉時照舊響 | Claude Sonnet | `agent_relay/cli.py` `watch_once()`、`automate()`；ai-inbox `docs/always-on-relay-gap-check.md` §4 |
+| R5 選填來源事件鍵 `send --dedupe-key`：同寄件者同鍵的信已存在（含 `done`）就不投遞、回傳原 id | 排程、hook 或失敗重試的自動寄信實際出現重複投遞 | 新測試：同鍵寄兩次只有一封；舊版用戶端讀得到新信封；簽章範圍含新欄位；SPEC 第 1、2 節中英同步 | Claude Opus | `agent_relay/envelope.py`、`agent_relay/store.py` `deliver()`、`agent_relay/cli.py` `send` |
+| R6 提問期限改機器可讀；`relay status` 列逾期未答、`watch` 對逾期題目補響一次 | 有提問因為沒人注意期限而逾期造成延誤 | 新測試：逾期題目出現在 status、只補響一次；舊的自由文字期限仍讀得到 | Claude Sonnet | `agent_relay/envelope.py`（question 欄位）、`agent_relay/status.py`、`agent_relay/cli.py` `watch_once()` |
+| R7 同一討論串只跑一個工人的選項（預設維持並行） | 工單之間實際出現先後相依、並行導致衝突 | 新測試：開啟時同 thread 第二封等第一封結束；關閉時照舊並行 | Claude Opus | `agent_relay/dispatch.py` `take_task()`（比照 `.owner`） |
+| R8 中斷續跑：`interrupted` 回信附保留的 worktree 與分支，重寄可指定從該分支接著做 | 中斷後從頭重做的成本實際造成困擾，且先定好半成品可信度的判準 | 新測試：重寄指定分支時工人從該分支開工；未指定時照舊從 base | Claude Opus | `agent_relay/dispatch.py` `reap_interrupted()`、`make_worktree()` |
+| R9 「工人需要人決定」的書面慣例：`needs-input` 結果加一封 `question`，指揮者 `answer` 後同討論串重派 | 工人實際卡在需要人決定、又沒有既定回法 | 只改 SPEC（中英）與派工信範本；不改執行流程 | Claude Sonnet | `SPEC.md` 第 6 節、`docs/templates/` |
 
 ## 刻意不做
 | 不做什麼 | 理由 | 什麼情況下重新考慮 |
