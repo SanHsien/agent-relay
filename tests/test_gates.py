@@ -282,6 +282,58 @@ class GateReviewTests(DispatchGateTests):
         self.assertEqual(gates.verify_command(Path("."), {"command": 'python -m pytest -k "a b"'})[-1], "a b")
 
 
+class ZeroTestGateTests(unittest.TestCase):
+    """A test run that collected nothing proved nothing: it must be `unverified`, never `ok`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        patch = mock.patch.dict(os.environ, {"AGENT_RELAY_HOME": str(self.dir / "home")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.worktree = self.dir / "wt"
+        self.worktree.mkdir()
+
+    def gate(self, command):
+        return gates.check(self.worktree, self.worktree, "HEAD", [], self.dir / "run",
+                           {"command": command, "no_stubs": False}, want_tdd=False)
+
+    def fake(self, output, code):
+        return [sys.executable, "-c", f"import sys; print({output!r}); sys.exit({code})"]
+
+    def test_real_unittest_discovering_nothing_is_unverified(self):
+        # Python 3.12+ exits 5 here; 3.10/3.11 exit 0 with "Ran 0 tests". Both must be unverified.
+        result = self.gate([sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"])
+        self.assertEqual(result.status, "unverified", result.notes)
+        self.assertFalse(result.passed)
+        self.assertTrue(any("0 個測試" in n for n in result.notes), result.notes)
+
+    def test_unittest_exit_zero_with_ran_0_tests_is_unverified(self):
+        result = self.gate(self.fake("\n----------------------------------------------------------------------\n"
+                                     "Ran 0 tests in 0.000s\n\nOK", 0))
+        self.assertEqual(result.status, "unverified", result.notes)
+
+    def test_pytest_exit_5_no_tests_ran_is_unverified(self):
+        result = self.gate(self.fake("============================ no tests ran in 0.01s =============================", 5))
+        self.assertEqual(result.status, "unverified", result.notes)
+
+    def test_pytest_exit_5_without_output_is_unverified(self):
+        result = self.gate([sys.executable, "-c", "import sys; sys.exit(5)", "-m", "pytest"])
+        self.assertEqual(result.status, "unverified", result.notes)
+
+    def test_tests_that_ran_still_pass(self):
+        (self.worktree / "test_one.py").write_text(
+            "import unittest\nclass T(unittest.TestCase):\n    def test_a(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8")
+        result = self.gate([sys.executable, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"])
+        self.assertEqual(result.status, "ok", result.notes)
+        self.assertEqual(self.gate(self.fake("Ran 10 tests in 0.1s\n\nOK", 0)).status, "ok")
+
+    def test_exit_5_from_a_non_test_runner_is_still_a_failure(self):
+        self.assertEqual(self.gate(self.fake("build broke", 5)).status, "verification-failed")
+
+
 class GovernancePolicyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -330,6 +330,8 @@ TDD         When dispatch.tdd: true or verify.tdd: true, opens a temporary workt
               run verify command on clean base → must pass (proves base was green, else tdd-not-proven)
               copy in worker's added/modified test files and run again → must fail (proves the test reproduces the issue, else tdd-not-proven)
 Green       Run verify command in the worker's worktree → if it fails, verification-failed
+            Zero tests ran (output has unittest's `Ran 0 tests` or pytest's `no tests ran`, or the command is
+            pytest/unittest and exits 5) → unverified: nothing was checked, so it is neither a pass nor a failure
 Logs        Full terminal output of each phase is written to runs/<id>/verify-base.log, verify-red.log, verify-green.log;
             on timeout, kills the entire process tree (including grandchildren); reply attaches command, exit code, last 15 lines, and log sha256;
             store/audit records a verify event (without raw output)

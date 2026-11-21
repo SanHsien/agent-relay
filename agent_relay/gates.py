@@ -490,6 +490,28 @@ def run_logged(argv: list[str], cwd: Path, log_file: Path, timeout_s: int) -> di
             "tail": "\n".join(text.strip().splitlines()[-TAIL_LINES:])}
 
 
+# "Ran 0 tests" is unittest (any version); "no tests ran" is pytest's closing line.
+_ZERO_TESTS = re.compile(r"^(?:Ran 0 tests? in |=*\s*no tests ran\b)", re.MULTILINE | re.IGNORECASE)
+NO_TESTS_EXIT = 5  # pytest, and unittest on Python 3.12+: nothing was collected
+
+
+def _names_test_runner(command: str) -> bool:
+    return any(Path(tok).stem.lower() in ("pytest", "py.test", "unittest") for tok in command.split())
+
+
+def ran_zero_tests(run: dict) -> bool:
+    """True when a gate run collected no tests at all, so its exit code proved nothing."""
+    if run.get("exit") not in (0, NO_TESTS_EXIT):
+        return False
+    try:
+        text = Path(run["log"]).read_text(encoding="utf-8", errors="replace")
+    except (OSError, KeyError):
+        text = run.get("tail", "")
+    if _ZERO_TESTS.search(text):
+        return True
+    return run.get("exit") == NO_TESTS_EXIT and _names_test_runner(run.get("command", ""))
+
+
 def _scratch_worktree(repo: Path, base: str, path: Path) -> None:
     procs.run(["git", "-C", str(repo), *SAFE_GIT, "worktree", "prune"], capture_output=True, check=False, timeout=60)
     if path.exists():
@@ -574,6 +596,8 @@ def check(repo: Path, worktree: Path, base: str, changed: list[str], run_dir: Pa
         notes.append(f"TDD：修改前驗證通過（base 綠），加上新測試後失敗（exit {red['exit']}），問題有被重現")
     green = run_logged(command, worktree, run_dir / "verify-green.log", timeout_s)
     logs.append({"phase": "green", **green})
+    if ran_zero_tests(green):
+        return GateResult("unverified", notes + [f"驗證指令跑了 0 個測試（exit {green['exit']}），沒有東西被驗證"], logs)
     if green["exit"] != 0:
         return GateResult("verification-failed", notes + [f"驗證指令失敗（exit {green['exit']}）"], logs)
     notes.append(f"綠燈：驗證指令通過（exit 0，{green['seconds']} 秒）")
