@@ -85,6 +85,15 @@ def check(cfg: dict, kind: str, project: str | None, refs: list[str] | None,
     if not project:
         result['status'] = 'reject' if result['errors'] else 'ok'
         return result
+    if not Path(project).is_absolute():
+        # The sidecar resolves a relative project in its own working directory, so no
+        # antigravity.repos entry and no override can ever make it match: refuse it outright.
+        result['errors'].append(
+            f"--project {project} is not an absolute path; the sidecar resolves it in its own working "
+            f"directory and would skip this mail silently forever. --allow-unlisted-project cannot help; "
+            f"pass the full repo path.")
+        result['status'] = 'reject'
+        return result
     home = receiver_home(cfg)
     try:
         allowed = load_allowlist(home)
@@ -100,8 +109,6 @@ def check(cfg: dict, kind: str, project: str | None, refs: list[str] | None,
         near = closest_allowed(resolved, allowed)
         lines = [f"--project {project} is not an antigravity.repos entry of {home / 'config.json'}; "
                  f"the sidecar would skip this mail silently (exact match only)."]
-        if not Path(project).is_absolute():
-            lines.append("the project is not an absolute path; the sidecar resolves it in its own working directory.")
         if near:
             lines.append(f"closest allowed entry: {near[0]}  ({near[1]})")
         lines.append("allowed: " + ", ".join(str(p) for p in allowed))

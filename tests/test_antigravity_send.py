@@ -90,6 +90,22 @@ class SendAllowlistTests(unittest.TestCase):
         self.assertEqual(json.loads(audit[0])['id'], mail_id)
         self.assertEqual(json.loads(audit[0])['reason'], 'receiver adds the entry next')
 
+    def test_override_cannot_send_a_bare_repo_name_the_sidecar_can_never_match(self):
+        # 2026-11-22: two mails with --project harness-guard (bare name) plus an override sat in
+        # new/ for hours. The sidecar resolves a relative path in its own cwd, so adding the entry
+        # to antigravity.repos can never make it deliverable; the override must not let it through.
+        for override in ((), ('--allow-unlisted-project', 'fleet upstream review batch')):
+            with self.subTest(override=bool(override)):
+                code, _, err = self.send('--project', 'rea', *override)
+                self.assertEqual(code, 10)
+                self.assertIn('absolute', err)
+        (self.recv / 'config.json').unlink()  # also when the allow-list cannot be read
+        code, _, err = self.send('--project', 'rea')
+        self.assertEqual(code, 10)
+        self.assertIn('absolute', err)
+        self.assertEqual(self.delivered(), [])
+        self.assertFalse((self.sender_home / 'send-overrides.jsonl').exists())
+
     def test_override_does_not_log_when_the_project_was_listed_anyway(self):
         code, _, _ = self.send('--project', str(self.rmwt), '--allow-unlisted-project', 'not actually needed')
         self.assertEqual(code, 0)
