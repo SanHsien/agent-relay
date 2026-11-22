@@ -483,7 +483,8 @@ store 是一個 git 分支，能推送它的人可以在 `from` 寫任何名字�
 
 - 心跳超過 `--stale-minutes`（預設 90 分鐘）沒更新，就標示「心跳逾時」。可能原因：收件端的排程停了，例如使用者登出，因為排程用的是 InteractiveToken；或是機器關了。
 - 本機派工：`runs/*/state.json` 裡 phase 為 `running`／`queued` 的工單，連同期限與 pid 是否存活。已過期的會列為「已逾期」；下一輪 `watch` 會補一封 `interrupted`（第 7 節）。
-- 退出碼：有心跳逾時或逾期工單時回傳 8，方便排程或腳本判斷；一切正常回傳 0。
+- Antigravity 未投遞：`mailboxes/antigravity/new/` 裡超過 `--undelivered-minutes`（預設 30 分鐘，約 sidecar 預設輪詢 300 秒的六輪）的信，在收件端 home（查找順序同第 20 節 `send --to antigravity`）的 `app-delivery/<id>.json` 沒有 `notified`／`attempting`／`uncertain` 收據，就列為「未投遞」並附原因：`skipped/` 的略過原因、`failed`／`refused` 收據內容，或「沒有收據」（sidecar 沒在跑，或是會靜默略過的舊版 sidecar）。讀不到收件端 home 時列「未檢查」，不當成沒有。只有這個信箱有逐信收據，其他信箱不做這項判斷。
+- 退出碼：有心跳逾時、逾期工單或 Antigravity 未投遞的信時回傳 8，方便排程或腳本判斷；一切正常回傳 0（「未檢查」不改變退出碼，但會印出來）。
 - `hosts/` 跟 `mailboxes/`、`claims/`、`audit/` 一樣，由 relay 自己 commit。
 
 ## 17. 清理（`relay gc`）
@@ -563,9 +564,10 @@ python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime cl
 - 收件 home 必須設定信箱 `antigravity`、`antigravity.conversation_id`、`repos`、`senders` 與 `agentapi_argv`，以及 SPEC §13 的本機受信任公鑰。`repos` 是非空的既有目錄清單，同一個會話可接受清單內任一 repo 的工單；舊的單一字串 `repo` 仍可用，視為只有一個元素的清單，兩個鍵同時出現是歧義，一律 `ValueError`，清單內任何路徑不存在或不是目錄也是 `ValueError`。只接受有效簽章、受允許寄件者、期限內（預設 24 小時），且 session ref 或 project 符合本機綁定的工單（project 必須在 `repos` 內；只有 session ref 而無 project 的信，範圍由信件自己定義）；有 dispatch 的工單不走這條路。通知固定文字寫該信自己的 project 路徑；沒有 project 時寫「範圍以信件所定義為準」，不列出全部 repo。多 repo 共用同一會話與 checkout 時，簽章與通知不能代替檔案範圍隔離，需要並行施工須用專用 worktree。
 - 明確的 `antigravity-session:<uuid>` 只接受兩種 UUID：設定檔綁定的 `conversation_id`，或本機 `app-delivery/*.json` 收據證明是本 sidecar 自己開出的對話（`mode` 為 `new-conversation`、`status` 為 `notified`、`conversation_id` 為該 UUID），後者以 `agentapi send-message <uuid>` 投遞。其他 UUID、收據為 `failed`／`refused`／`uncertain`／`attempting` 的 UUID 一律略過且不寫收據；UUID 須為小寫連字號寫法，一封信只能帶一個 session ref。`kind` 只限 `task`／`reply`；簽章、寄件者、期限、`project` 白名單、`dispatch` 排除與收據去重全部照舊。這類後續訊息的收據記 `mode: follow-up`，不作為授權依據。寄件端不從原信推導 UUID（收據是收件端本機狀態，不在共享 store），由 `--ref` 明確帶上。
 - 通知內容只有 ID 與固定收信／回報指令，不執行信件文字。會話自身的模型、hooks、權限與人工確認要求繼續生效。
-- `app-delivery/<id>.json` 排他建立 `attempting` 收據後才通知；成功為 `notified`、非零為 `failed`、逾時為 `uncertain`。簽章驗證失敗的信寫 `refused`（含原因）收據，只在第一次輸出拒絕訊息，之後的輪次靜默略過；因政策略過的信（寄件者、會話、專案、期限不符）不寫收據也不輸出。所有已嘗試的信件都不自動重送，避免不確定結果造成重複施工。通知不等於收信：原信由會話執行 read／result／ack。
+- `app-delivery/<id>.json` 排他建立 `attempting` 收據後才通知；成功為 `notified`、非零為 `failed`、逾時為 `uncertain`。簽章驗證失敗的信寫 `refused`（含原因）收據，只在第一次輸出拒絕訊息，之後的輪次靜默略過；因政策略過的信（種類、寄件者、會話、專案、dispatch、期限不符）不寫收據，改在 `app-delivery/skipped/<id>.json` 留一份附原因的紀錄，並輸出一行 `{"id", "status": "skipped", "reason"}`；同一封信、同一原因只輸出一次，原因變了才再輸出。這份紀錄不在收據層級，不擋之後的投遞（收件端把專案加進 `repos` 後照常通知），也不能替任何會話作保。所有已嘗試的信件都不自動重送，避免不確定結果造成重複施工。通知不等於收信：原信由會話執行 read／result／ack。
 - 每輪結束（有通知或閒置）sidecar 依 §16 寫 `hosts/antigravity@<主機>.json` 心跳，由 `relay status` 顯示；到期才寫並 push，心跳或 push 失敗只記入結果的 `heartbeat_error`，不影響已送出的 `notified`。sidecar 啟動時把 `AGENT_RELAY_HOME` 設為自己的 `--home`（該目錄沒有 `runs/`），所以 `running`／`queued` 恆為空，不會冒用主收件端的派工。
 - 不需要新的 Windows 收信排程；App 必須運行。停用 sidecar 不刪信、不刪收據。
+- 同一個收件 home 只留最新的 sidecar：常駐迴圈啟動時把 `<pid>-<隨機>` 寫進 `<home>/sidecar.pid`，每輪開始前比對；檔案被較新的 sidecar 換掉，就輸出 `{"status": "superseded"}` 並以退出碼 0 結束（`restart_policy: on-failure` 不會把它叫回來）。檔案不見就重新寫入繼續；讀檔遇到暫時性錯誤留到下一輪再比。`--once` 不碰這個檔，不會讓常駐的 sidecar 退場。App 每次重啟都會再起一個 sidecar，舊的不一定會停（2026-11-22 同時有五個）。
 - 現行 Antigravity 官方 hooks 支援 SessionStart 與 PreInvocation，但與 Claude 格式不同；本接法不用變更任何現有 hook。
 - 開出的新對話標題為 `[Relay] <信件 ID 末六碼> <主旨>`：主旨經遮蔽機密字串、移除控制字元、壓成單行並截成最多 48 字元（超過以 `…` 結尾）。`redact` 只遮蔽 token 形狀的字串，不會遮蔽路徑或 `Bearer xxx` 之類的片段，標題裡會原樣出現；這是接受的限制（主旨來自已簽章、受允許的寄件者，標題只顯示在本機 Desktop 側欄）。主旨只出現在單一 `--title=` 引數內，信件內文與其他欄位仍不進程序引數。
 - `send --to antigravity` 寄信前讀收件端 `config.json` 的 `antigravity.repos`（與 sidecar 同一個 `_repos` 函式），`--project` 必須與其中一項**完全相同**，否則以退出碼 10 拒絕、不寫信，並指出最接近的允許項目。收件端 home 的查找順序：環境變數 `AGENT_RELAY_ANTIGRAVITY_HOME`、寄件端 config 的 `antigravity_home`、`~/.agent-relay-antigravity`。讀不到（檔案不存在、損壞、跨機器）時在 stderr 大聲警告後仍寄出，不會靜默。`--ref antigravity-session:new` 缺 `--project` 或不是 `kind=task` 同樣以退出碼 10 拒絕。`--allow-unlisted-project "<理由>"`（理由至少 8 字元）可強制寄出：stderr 警告並在寄件端 home 的 `send-overrides.jsonl` 留一行紀錄；sidecar 仍會略過該信，直到收件端把路徑加進 `repos`。`--project` 不是絕對路徑（例如只寫 repo 名稱）時，不論清單讀不讀得到、有沒有 override，一律以退出碼 10 拒絕：sidecar 會在自己的工作目錄解析相對路徑，加進 `repos` 也永遠對不上。

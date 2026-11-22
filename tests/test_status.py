@@ -1,5 +1,6 @@
 """T-20261021-10: relay status and receiver heartbeats."""
 
+import io
 import json
 import os
 import sys
@@ -57,6 +58,70 @@ class StatusTests(unittest.TestCase):
     def test_watch_writes_the_heartbeat(self):
         cli.watch_once("claude-code", self.cfg, sync=False)
         self.assertTrue(self.beat.is_file())
+
+
+class UndeliveredTests(unittest.TestCase):
+    """2026-11-22: two mails sat in antigravity/new for 3+ hours while status said all ok."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.recv = self.dir / "recv-home"
+        (self.recv / "app-delivery").mkdir(parents=True)
+        (self.recv / "config.json").write_text("{}", encoding="utf-8")
+        patch = mock.patch.dict(os.environ, {"AGENT_RELAY_HOME": str(self.dir / "home"),
+                                             "AGENT_RELAY_ANTIGRAVITY_HOME": str(self.recv)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.cfg = {"store": str(self.dir / "store"), "agent": "commander", "doorbells": []}
+        self.now = time.time()
+
+    def mail(self, minutes_ago, to="antigravity"):
+        env = envelope.build(sender="commander", to=to, subject="s", body="")
+        env["created_at"] = status._iso(self.now - minutes_ago * 60)
+        Store(self.cfg["store"]).deliver(env)
+        return env["id"]
+
+    def receipt(self, mail_id, value, skipped=False):
+        folder = self.recv / "app-delivery" / ("skipped" if skipped else "")
+        folder.mkdir(exist_ok=True)
+        (folder / f"{mail_id}.json").write_text(json.dumps(value), encoding="utf-8")
+
+    def overview(self, **kw):
+        return status.overview(self.cfg, now=self.now, **kw)
+
+    def test_old_antigravity_mail_without_receipt_is_undelivered(self):
+        stuck = self.mail(200)
+        self.mail(5)  # younger than one or two sidecar polls: not yet suspicious
+        data = self.overview(undelivered_minutes=30)
+        self.assertEqual([item["id"] for item in data["undelivered"]], [stuck])
+        self.assertEqual(data["undelivered"][0]["mailbox"], "antigravity")
+        self.assertIn("未投遞", status.render(data))
+        self.assertIn(stuck, status.render(data))
+
+    def test_notified_receipt_counts_as_delivered_but_skipped_does_not(self):
+        ok, skipped = self.mail(200), self.mail(200)
+        self.receipt(ok, {"status": "notified"})
+        self.receipt(skipped, {"status": "skipped", "reason": "project harness-guard is not in antigravity.repos"},
+                     skipped=True)
+        data = self.overview(undelivered_minutes=30)
+        self.assertEqual([item["id"] for item in data["undelivered"]], [skipped])
+        self.assertIn("harness-guard", data["undelivered"][0]["reason"])
+
+    def test_unreadable_receiver_home_is_unchecked_not_empty(self):
+        self.mail(200)
+        (self.recv / "config.json").unlink()
+        data = self.overview(undelivered_minutes=30)
+        self.assertIsNone(data["undelivered"])
+        self.assertIn("未檢查", status.render(data))
+
+    def test_status_exits_non_zero_on_undelivered_mail(self):
+        self.mail(200)
+        with mock.patch.dict(os.environ, {"AGENT_RELAY_STORE": self.cfg["store"], "AGENT_RELAY_AGENT": "commander"}), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            code = cli.main(["status", "--no-sync", "--undelivered-minutes", "30"])
+        self.assertEqual(code, 8)
 
 
 if __name__ == "__main__":

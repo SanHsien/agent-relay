@@ -616,9 +616,9 @@ def cmd_status(args, cfg) -> int:
             gitsync.pull(Path(cfg["store"]))
         except gitsync.SyncError as exc:
             print(f"warning: store pull failed, showing the local copy: {exc}", file=sys.stderr)
-    data = relay_status.overview(cfg, args.stale_minutes)
+    data = relay_status.overview(cfg, args.stale_minutes, undelivered_minutes=args.undelivered_minutes)
     _out(args, data, relay_status.render(data))
-    return 8 if any(h["stale"] for h in data["hosts"]) or data["overdue"] else 0
+    return 8 if any(h["stale"] for h in data["hosts"]) or data["overdue"] or data["undelivered"] else 0
 
 
 def cmd_gc(args, cfg) -> int:
@@ -865,6 +865,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="open mail per mailbox, receiver heartbeats, runs on this machine")
     s.add_argument("--stale-minutes", type=float, default=relay_status.DEFAULT_STALE_MIN,
                    help="a heartbeat older than this counts as a stopped receiver")
+    s.add_argument("--undelivered-minutes", type=float, default=relay_status.DEFAULT_UNDELIVERED_MIN,
+                   help="antigravity mail in new/ this old without a notified receipt counts as undelivered")
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("gc", help="remove finished dispatch worktrees, branches, run records and old done mail")

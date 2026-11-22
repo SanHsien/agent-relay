@@ -22,6 +22,7 @@ from .procs import pid_alive
 SCHEMA = "agent-relay/heartbeat@1"
 DEFAULT_HEARTBEAT_MIN = 30
 DEFAULT_STALE_MIN = 90
+DEFAULT_UNDELIVERED_MIN = 30  # six sidecar polls at the default 300 s interval
 
 
 def _host() -> str:
@@ -87,7 +88,53 @@ def heartbeat(cfg: dict, agent: str, now: float | None = None) -> bool:
     return True
 
 
-def overview(cfg: dict, stale_minutes: float = DEFAULT_STALE_MIN, now: float | None = None) -> dict:
+def _receipt(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def undelivered(cfg: dict, minutes: float, now: float) -> tuple[list[dict] | None, str | None]:
+    """Mail in antigravity/new older than `minutes` that the sidecar never notified.
+
+    Only the Antigravity sidecar keeps per-mail delivery receipts (app-delivery/ in the receiver
+    home), so only that mailbox can be judged. Returns (None, reason) when the receiver home
+    cannot be read on this machine: unchecked, never reported as "nothing stuck"."""
+    from .antigravity_send import receiver_home  # local: antigravity_send imports this package's sidecar
+    box = Path(cfg["store"]) / "mailboxes" / "antigravity" / "new"
+    mails = sorted(f for f in box.glob("*.json") if not f.name.startswith(".")) if box.is_dir() else []
+    if not mails:
+        return [], None
+    home = receiver_home(cfg)
+    if not (home / "config.json").is_file():
+        return None, f"{home / 'config.json'} is not readable here"
+    receipts = home / "app-delivery"
+    out = []
+    for path in mails:
+        mail = _receipt(path) or {}
+        mail_id = mail.get("id") or path.stem
+        created = _parse(mail.get("created_at", ""))
+        age = None if created is None else (now - created) / 60
+        if age is not None and age < minutes:
+            continue
+        got = _receipt(receipts / f"{mail_id}.json")
+        if got and got.get("status") in ("notified", "attempting", "uncertain"):
+            continue  # reached the App, or may have: not this check's business
+        if got:
+            reason = f"receipt {got.get('status')}: {got.get('reason') or got.get('detail') or ''}".rstrip(": ")
+        else:
+            note = _receipt(receipts / "skipped" / f"{mail_id}.json")
+            reason = (f"skipped: {note.get('reason')}" if note else
+                      "no receipt (sidecar not running, or an older sidecar that skips silently)")
+        out.append({"mailbox": "antigravity", "id": mail_id, "subject": mail.get("subject"),
+                    "age_minutes": None if age is None else round(age, 1), "reason": reason})
+    return out, None
+
+
+def overview(cfg: dict, stale_minutes: float = DEFAULT_STALE_MIN, now: float | None = None,
+             undelivered_minutes: float = DEFAULT_UNDELIVERED_MIN) -> dict:
     now = now or time.time()
     store = Path(cfg["store"])
     boxes = {}
@@ -110,8 +157,10 @@ def overview(cfg: dict, stale_minutes: float = DEFAULT_STALE_MIN, now: float | N
                       "stale": age is None or age > stale_minutes,
                       "running": data.get("running") or [], "queued": data.get("queued") or []})
     leases = local_leases(now)
+    stuck, unchecked = undelivered(cfg, undelivered_minutes, now)
     return {"mailboxes": boxes, "hosts": hosts, "local_runs": leases,
-            "overdue": [lease["id"] for lease in leases if lease["overdue"]], "stale_minutes": stale_minutes}
+            "overdue": [lease["id"] for lease in leases if lease["overdue"]], "stale_minutes": stale_minutes,
+            "undelivered": stuck, "undelivered_unchecked": unchecked, "undelivered_minutes": undelivered_minutes}
 
 
 def render(data: dict) -> str:
@@ -124,6 +173,12 @@ def render(data: dict) -> str:
                      f"queued {len(host['queued'])}")
     if not data["hosts"]:
         lines.append("  （還沒有任何心跳）")
+    lines.append(f"Antigravity 未投遞（在 new/ 超過 {data['undelivered_minutes']:g} 分鐘、沒有通知收據）:")
+    if data["undelivered"] is None:
+        lines.append(f"  ⚠ 未檢查：{data['undelivered_unchecked']}")
+    else:
+        lines += [f"  ⚠ {item['id']}（{item['age_minutes']} 分鐘）{item['subject'] or ''}：{item['reason']}"
+                  for item in data["undelivered"]] or ["  （沒有）"]
     lines.append("本機派工:")
     lines += [f"  {lease['id']}: {lease['phase']}{'（已逾期）' if lease['overdue'] else ''}"
               f"{'' if lease['alive'] else '（行程已不在）'}" for lease in data["local_runs"]] or ["  （沒有）"]
