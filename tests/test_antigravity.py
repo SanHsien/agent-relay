@@ -144,14 +144,85 @@ class AppDeliveryTests(unittest.TestCase):
         self.assertEqual(receipt, {'status': 'refused', 'reason': 'bad signature'})
         self.run.assert_not_called()
 
-    def test_policy_skipped_mail_is_silent_and_has_no_receipt(self):
-        self.mail(sender='mallory')
-        self.verify.return_value = 'bad signature'
+    def deliver_printing(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            self.deliver()
-        self.assertEqual(out.getvalue(), '')
+            result = self.deliver()
+        return result, [json.loads(line) for line in out.getvalue().splitlines()]
+
+    def test_policy_skipped_mail_is_logged_once_and_leaves_no_delivery_receipt(self):
+        mail = self.mail(sender='mallory')
+        self.verify.return_value = 'bad signature'
+        result, lines = self.deliver_printing()
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual([(line['id'], line['status']) for line in lines], [(mail['id'], 'skipped')])
+        self.assertIn('sender', lines[0]['reason'])
+        # No top-level receipt: that is what blocks a later delivery and vouches for sessions.
         self.assertEqual(list((self.home / 'app-delivery').glob('*.json')), [])
+        self.assertTrue((self.home / 'app-delivery' / 'skipped' / f"{mail['id']}.json").is_file())
+        self.assertEqual(self.deliver_printing()[1], [])  # once per mail, not every cycle
+
+    def test_bare_project_name_is_logged_as_skipped_not_silently_idle(self):
+        # 2026-11-22: `--project harness-guard` sat in new/ for hours; the sidecar said nothing.
+        mail = self.mail(refs=['antigravity-session:new'], project='harness-guard')
+        result, lines = self.deliver_printing()
+        self.assertEqual(result['status'], 'idle')
+        self.assertEqual(lines[0]['id'], mail['id'])
+        self.assertEqual(lines[0]['status'], 'skipped')
+        self.assertIn('harness-guard', lines[0]['reason'])
+        self.assertIn('repos', lines[0]['reason'])
+        self.run.assert_not_called()
+
+    def test_skipped_unlisted_project_is_still_delivered_once_the_repo_is_listed(self):
+        second = self.home / 'other-repo'
+        second.mkdir()
+        mail = self.mail(refs=[], project=str(second))
+        self.assertEqual(self.deliver_printing()[1][0]['status'], 'skipped')
+        self.use_repos(self.repo, second)
+        result = self.deliver()
+        self.assertEqual((result['status'], result['id']), ('notified', mail['id']))
+
+    def test_expired_mail_is_logged_as_skipped_with_its_age(self):
+        mail = self.mail(created_at='2020-01-01T00:00:00Z')
+        _, lines = self.deliver_printing()
+        self.assertEqual((lines[0]['id'], lines[0]['status']), (mail['id'], 'skipped'))
+        self.assertIn('max_age_hours', lines[0]['reason'])
+
+    def test_main_loop_exits_when_a_newer_sidecar_takes_over(self):
+        # Each Antigravity restart starts another sidecar; on 2026-11-22 five ran at once.
+        lock = self.home / 'sidecar.pid'
+        calls = []
+
+        def newer_instance_starts(_seconds):
+            if len(calls) > 2:
+                raise RuntimeError('the old sidecar kept polling after it was superseded')
+            lock.write_text('99999-newer', encoding='utf-8')
+
+        with mock.patch.object(antigravity, 'deliver_once', side_effect=lambda home: calls.append(home) or {'status': 'idle'}), \
+                mock.patch.object(antigravity.time, 'sleep', side_effect=newer_instance_starts), \
+                mock.patch('sys.argv', ['antigravity', '--home', str(self.home)]), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(antigravity.main(), 0)
+        self.assertEqual(len(calls), 1)  # the old one stops instead of polling alongside the new one
+        self.assertIn('superseded', out.getvalue())
+
+    def test_main_loop_claims_the_instance_file_and_once_does_not(self):
+        lock = self.home / 'sidecar.pid'
+        with mock.patch.object(antigravity, 'deliver_once', return_value={'status': 'idle'}), \
+                mock.patch('sys.argv', ['antigravity', '--home', str(self.home), '--once']), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(antigravity.main(), 0)
+        self.assertFalse(lock.exists())  # a manual --once must not retire the running daemon
+        seen = []
+        with mock.patch.object(antigravity, 'deliver_once', return_value={'status': 'idle'}), \
+                mock.patch.object(antigravity.time, 'sleep',
+                                  side_effect=lambda _s: seen.append(lock.read_text(encoding='utf-8') if lock.exists() else None)
+                                  or (len(seen) > 2 and (_ for _ in ()).throw(RuntimeError('never stopped')))
+                                  or lock.write_text('1-other', encoding='utf-8')), \
+                mock.patch('sys.argv', ['antigravity', '--home', str(self.home)]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(antigravity.main(), 0)
+        self.assertTrue(seen[0].startswith(f'{os.getpid()}-'))
 
     def beat_path(self):
         host = antigravity.relay_status._host()

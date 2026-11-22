@@ -108,6 +108,70 @@ def _opened_sessions(state_dir: Path) -> set[str]:
     return opened
 
 
+def _route(mail: dict, settings: dict, session: str, senders: list, repos: set[Path],
+           opened: set[str]) -> tuple[str | None, str, Path | None, bool]:
+    """Policy for one new mail: (skip reason or None, target session, project, new conversation)."""
+    if mail['kind'] not in ('task', 'reply'):
+        return f"kind {mail['kind']!r} is not task or reply", session, None, False
+    if mail['from'] not in senders:
+        return f"sender {mail['from']!r} is not in antigravity.senders", session, None, False
+    # A signed explicit session ref, or a signed project, must match local policy.
+    refs = mail.get('refs', [])
+    session_refs = [ref for ref in refs if ref.startswith('antigravity-session:')]
+    new_conv = session_refs == ['antigravity-session:new']
+    target_session = session
+    if new_conv:
+        target_session = 'new'
+    elif session_refs:
+        # Exactly one explicit ref: the bound conversation, or one this sidecar opened.
+        named = _canonical_uuid(session_refs[0].removeprefix('antigravity-session:'))
+        if len(session_refs) != 1 or named is None or (named != session and named not in opened):
+            return ("session ref is not exactly one bound or relay-opened conversation: "
+                    + ", ".join(session_refs)), session, None, False
+        target_session = named
+    elif not mail.get('project'):
+        return "no antigravity-session ref and no project", session, None, False
+    if new_conv and (mail['kind'] != 'task' or not mail.get('project')):
+        return "antigravity-session:new needs kind task and a project", session, None, False
+    project = Path(mail['project']).resolve() if mail.get('project') else None
+    if project is not None and project not in repos:
+        hint = '' if Path(mail['project']).is_absolute() else ' (not an absolute path)'
+        return (f"project {mail['project']!r}{hint} is not in antigravity.repos",
+                target_session, None, new_conv)
+    if mail.get('dispatch'):
+        return "dispatch mail uses the fresh-worker protocol", target_session, None, new_conv
+    try:
+        created = datetime.fromisoformat(mail['created_at'].replace('Z', '+00:00'))
+        age = (datetime.now(timezone.utc) - created).total_seconds()
+    except (ValueError, TypeError):
+        return f"created_at {mail.get('created_at')!r} is not a valid time", target_session, None, new_conv
+    max_age = float(settings.get('max_age_hours', 24))
+    if not 0 <= age <= max_age * 3600:
+        return (f"age {age / 3600:.1f} h is outside 0..max_age_hours ({max_age:g})",
+                target_session, None, new_conv)
+    return None, target_session, project, new_conv
+
+
+def _note_skip(state_dir: Path, mail: dict, reason: str) -> None:
+    """Report a policy skip once per mail and reason. The note lives in skipped/, never next to
+    the delivery receipts: a receipt blocks delivery and can vouch for a session, a note must not
+    (adding the repo to antigravity.repos later still delivers the mail)."""
+    folder = state_dir / 'skipped'
+    path = folder / f"{mail['id']}.json"
+    try:
+        if json.loads(path.read_text(encoding='utf-8')).get('reason') == reason:
+            return
+    except (OSError, ValueError, AttributeError):
+        pass
+    record = {'id': mail['id'], 'status': 'skipped', 'reason': reason}
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        _write(path, record)
+    except OSError:
+        pass  # still print: losing the note must not hide the skip
+    print(json.dumps(record, ensure_ascii=False), flush=True)
+
+
 def _deliver(home: Path, *, sync: bool) -> dict:
     """At most one notification per cycle; attempted sends are never auto-retried."""
     cfg = json.loads((home / 'config.json').read_text(encoding='utf-8'))
@@ -129,36 +193,11 @@ def _deliver(home: Path, *, sync: bool) -> dict:
     _, allowed = signing.settings(cfg, home)
     opened = _opened_sessions(state_dir)
     for state, mail in Store(cfg['store']).list(agent):
-        if state != 'new' or mail['kind'] not in ('task', 'reply') or mail['from'] not in senders:
-            continue
-        # A signed explicit session ref, or a signed project, must match local policy.
-        refs = mail.get('refs', [])
-        session_refs = [ref for ref in refs if ref.startswith('antigravity-session:')]
-        new_conv = session_refs == ['antigravity-session:new']
-        target_session = session
-        if new_conv:
-            target_session = 'new'
-        elif session_refs:
-            # Exactly one explicit ref: the bound conversation, or one this sidecar opened.
-            named = _canonical_uuid(session_refs[0].removeprefix('antigravity-session:'))
-            if len(session_refs) != 1 or named is None or (named != session and named not in opened):
-                continue
-            target_session = named
-        elif not mail.get('project'):
-            continue
-        if new_conv and (mail['kind'] != 'task' or not mail.get('project')):
-            continue
-        project = Path(mail['project']).resolve() if mail.get('project') else None
-        if project is not None and project not in repos:
-            continue
-        if mail.get('dispatch'):
-            continue  # dispatch is a different, fresh-worker protocol
-        try:
-            created = datetime.fromisoformat(mail['created_at'].replace('Z', '+00:00'))
-            age = (datetime.now(timezone.utc) - created).total_seconds()
-        except (ValueError, TypeError):
-            continue
-        if not 0 <= age <= float(settings.get('max_age_hours', 24)) * 3600:
+        if state != 'new' or (state_dir / f"{mail['id']}.json").exists():
+            continue  # a receipt already settled this mail (notified, failed, refused, ...)
+        skip, target_session, project, new_conv = _route(mail, settings, session, senders, repos, opened)
+        if skip:
+            _note_skip(state_dir, mail, skip)
             continue
         reason = signing.verify(mail, allowed)
         if reason:
@@ -220,6 +259,32 @@ def _deliver(home: Path, *, sync: bool) -> dict:
     return {'status': 'idle'}
 
 
+INSTANCE_FILE = 'sidecar.pid'
+
+
+def _claim_instance(home: Path) -> str:
+    """Newest sidecar wins. Antigravity starts a fresh sidecar on every App restart without
+    always stopping the old one (five ran at once on 2026-11-22); each loop checks this file
+    and an older instance whose token was replaced exits instead of polling alongside."""
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    path = home / INSTANCE_FILE
+    tmp = path.with_name(f".tmp-{INSTANCE_FILE}-{token}")
+    tmp.write_text(token, encoding='utf-8')
+    os.replace(tmp, path)
+    return token
+
+
+def _instance_owner(home: Path, token: str) -> str | None:
+    """The token in the instance file; None when it is gone. A transient read error (Windows
+    sharing violation while another instance replaces it) answers our own token: check next round."""
+    try:
+        return (home / INSTANCE_FILE).read_text(encoding='utf-8').strip() or None
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return token
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path, required=True)
@@ -231,9 +296,18 @@ def main() -> int:
     # The heartbeat lists dispatch runs found under config.home(); this sidecar has its own
     # home (no runs/), so point it there instead of reporting the main receiver's runs.
     os.environ['AGENT_RELAY_HOME'] = str(args.home.resolve())
+    home = args.home.resolve()
+    token = None if args.once else _claim_instance(home)
     while True:
+        if token is not None:
+            owner = _instance_owner(home, token)
+            if owner is None:
+                token = _claim_instance(home)  # the file vanished: take it back, do not stop delivering
+            elif owner != token:
+                print(json.dumps({'status': 'superseded', 'by': owner.split('-')[0]}), flush=True)
+                return 0  # exit 0: restart_policy on-failure must not bring the old instance back
         try:
-            result = deliver_once(args.home.resolve())
+            result = deliver_once(home)
         except (OSError, ValueError, KeyError, gitsync.SyncError, signing.SigningError) as exc:
             result = {'status': 'error', 'error': type(exc).__name__}
         if result['status'] != 'idle' or args.once:

@@ -126,6 +126,8 @@ Local delivery receipts are stored in `~/.agent-relay-antigravity/app-delivery/<
 - `refused`: signature verification failed, with the reason recorded in the receipt; the refusal is printed once and silently skipped on subsequent cycles.
 - `uncertain` / `attempting`: timed out or interrupted mid-flight; delivery may already have succeeded. Check the target conversation first and **do not blindly resend**.
 
+Messages skipped by policy (sender, session, project, age and so on) get no receipt; the reason is written to `app-delivery/skipped/<message id>.json` and the sidecar log shows `status: skipped` once. When a message sits in `new/` without a notification, run `python -m agent_relay status`: its "undelivered Antigravity mail" section lists the message and the reason (SPEC Section 16).
+
 The sidecar creates an exclusive `attempting` receipt before calling the API so two processes cannot notify the same message concurrently. This errs on the side of preventing duplicate execution rather than guaranteeing exactly-once delivery. Only after confirming that the notification never arrived and fixing the underlying cause should the operator back up and remove that receipt so the next cycle can re-notify; do not resend the task message. When scheduled polling is healthy, do not repeatedly run manual smoke tests or create extra test messages.
 
 Single-cycle diagnostic command (must run inside the App sidecar environment and will send a real notification):

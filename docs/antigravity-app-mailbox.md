@@ -126,6 +126,8 @@ sidecar 改用 `agentapi send-message <UUID>` 投遞，條件是：
 - `refused`：簽章驗證失敗，收據記錄原因；拒絕訊息只輸出一次，之後的輪次靜默略過。
 - `uncertain`／`attempting`：逾時或程序中斷，可能已送達。先看指定會話，**不要盲目重送**。
 
+因政策略過的信（寄件者、會話、專案、期限等不符）沒有收據，原因寫在 `app-delivery/skipped/<信件 ID>.json`，sidecar 紀錄只輸出一次 `status: skipped`。信停在 `new/` 卻沒有通知時，跑 `python -m agent_relay status`：「Antigravity 未投遞」一段會列出這封信與原因（SPEC 第 16 節）。
+
 先記錄 `attempting` 再呼叫 API，並利用檔案的排他建立避免兩個程序同時發同信。這是偏向避免重複施工的策略，不是 exactly-once 保證。確定未送達且排除錯誤後，才由操作者備份並移走該張收據，允許下一輪補通知；不要重寄工單。排程正常時不反覆跑手動 smoke，不另建第二張試驗資料。
 
 單次診斷指令（須在 App sidecar 環境，會真的通知）：
