@@ -146,9 +146,11 @@ def _route(mail: dict, settings: dict, session: str, senders: list, repos: set[P
     except (ValueError, TypeError):
         return f"created_at {mail.get('created_at')!r} is not a valid time", target_session, None, new_conv
     max_age = float(settings.get('max_age_hours', 24))
-    if not 0 <= age <= max_age * 3600:
-        return (f"age {age / 3600:.1f} h is outside 0..max_age_hours ({max_age:g})",
-                target_session, None, new_conv)
+    # Reasons are the dedupe key of _note_skip: no value that changes from poll to poll here.
+    if age < 0:
+        return "created_at is in the future", target_session, None, new_conv
+    if age > max_age * 3600:
+        return f"older than max_age_hours ({max_age:g})", target_session, None, new_conv
     return None, target_session, project, new_conv
 
 

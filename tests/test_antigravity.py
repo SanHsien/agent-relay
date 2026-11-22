@@ -188,6 +188,24 @@ class AppDeliveryTests(unittest.TestCase):
         self.assertEqual((lines[0]['id'], lines[0]['status']), (mail['id'], 'skipped'))
         self.assertIn('max_age_hours', lines[0]['reason'])
 
+    def test_expired_or_future_mail_is_logged_once_while_the_clock_advances(self):
+        from datetime import datetime as real_datetime, timedelta, timezone as tz
+        self.mail(created_at='2026-11-20T00:00:00Z')  # expired
+        self.mail(created_at='2026-12-31T00:00:00Z')  # future-dated
+        start = real_datetime(2026, 11, 22, 8, 0, tzinfo=tz.utc)
+        lines = []
+        for poll in range(5):
+            class Clock(real_datetime):
+                @classmethod
+                def now(cls, tz=None, _at=start + timedelta(minutes=6 * poll)):
+                    return _at
+            with mock.patch.object(antigravity, 'datetime', Clock):
+                lines += self.deliver_printing()[1]
+        self.assertEqual(len(lines), 2)  # one per mail, not one per poll
+        self.assertTrue(all(line['status'] == 'skipped' for line in lines))
+        self.assertEqual(sorted(line['reason'] for line in lines),
+                         ['created_at is in the future', 'older than max_age_hours (24)'])
+
     def test_main_loop_exits_when_a_newer_sidecar_takes_over(self):
         # Each Antigravity restart starts another sidecar; on 2026-11-22 five ran at once.
         lock = self.home / 'sidecar.pid'
