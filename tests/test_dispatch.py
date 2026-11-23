@@ -526,6 +526,18 @@ class Claude3pTests(DispatchBase):
         self.assertEqual((argv[0], argv[argv.index("--model") + 1], stdin), ("claude", "gpt-6.1-sol", "P"))
         self.assertNotIn("k3p", " ".join(argv))  # the key never reaches the command line
 
+    def test_codex_default_model_from_receiver_config(self):
+        cfg = {"dispatch": {}}
+        with mock.patch.object(dispatch, "_cortex_launcher", return_value=None):
+            bare, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+            cfg["dispatch"]["codex"] = {"model": "gpt-6.1-sol"}
+            pinned, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x"}, "P", "s", self.dir / "L", self.dir, cfg)
+            explicit, _, _ = dispatch.build_argv({"runtime": "codex", "repo": "x", "model": "gpt-6-luna"},
+                                                 "P", "s", self.dir / "L", self.dir, cfg)
+        self.assertNotIn("--model", bare)  # nothing configured: Codex keeps its own default
+        self.assertEqual(pinned[pinned.index("--model") + 1], "gpt-6.1-sol")
+        self.assertEqual(explicit[explicit.index("--model") + 1], "gpt-6-luna")  # the message wins
+
     def test_claude_workers_get_no_mcp_hooks_or_plugins(self):
         cfg = self.profile()
         cfg["dispatch"]["claude_3p"]["model"] = "gpt-6.1-sol"

@@ -358,6 +358,12 @@ def build_argv(spec: dict, prompt: str, slice_id: str, log_dir: Path, worktree: 
             raise DispatchError("claude-3p needs a model: dispatch.model, or dispatch.claude_3p.model on this machine")
         check_3p_model(model)
         runtime, spec = "claude", {**spec, "model": model}
+    if runtime == "codex" and not model:
+        # The receiver's own Codex default can be a model its login cannot run (a ChatGPT
+        # account refuses some ids); dispatch.codex.model pins a known-good one for relay runs.
+        model = (cfg.get("dispatch") or {}).get("codex", {}).get("model")
+        if model:
+            spec = {**spec, "model": model}
     if runtime == "hermes":
         return build_hermes_argv(spec, prompt, log_dir, worktree), "built-in", None
     tools = list((cfg.get("dispatch") or {}).get("claude_allowed_tools") or DEFAULT_CLAUDE_TOOLS)

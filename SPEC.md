@@ -185,6 +185,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
 - **中斷補救**：開跑時寫 `~/.agent-relay/runs/<id>/state.json`（含期限 = 逾時 + 10 分鐘）。分頁被關、當機或重開機時，信會停在 `cur/`；下一輪 `watch` 看到期限已過、還沒回信，就補一封 `status: interrupted` 並 ack，並立刻同步出去。門鈴響了卻一直沒啟動（沒有 state.json，超過 30 分鐘）的信，在有設 dispatch 門鈴時也一樣補回信。補救時某一封出錯只記 log、跳過，不會讓整個 watch 停掉。
 - 已 `done` 的信不會再派；要重跑加 `relay dispatch <id> --force`。worktree 已存在時，只沿用 git 登記為 `relay/<id>` 的那個 worktree，diff 以該分支的 merge-base 為準；路徑上若是別的資料夾就拒絕。
 - 已知範圍：worktree 之間共用同一個 repo 的物件庫，但工人拿不到 `.git` 目錄的寫入權，commit 一律由 relay 做。
+- **codex 預設模型**：信件沒寫 `model` 時，用收件端的 `dispatch.codex.model`；兩邊都沒有才用收件端 Codex 自己 config 的預設。收件端 Codex 的預設模型可能是它的登入方式跑不了的（例如 ChatGPT 帳號不支援的 id），設這一項就不必每封信都帶 `--model`。
 - **claude-3p**：同一個 Claude Code CLI，改經 Claude Desktop 3P 的 gateway（例如本機 opencodex，`127.0.0.1:10100`）呼叫模型。權限、prompt 走 stdin、不給 shell 等規則都和 `claude` 相同。
   - gateway 的網址與金鑰在**執行當下**從 3P 設定檔讀取：預設是 `%LOCALAPPDATA%\Claude-3p\configLibrary\_meta.json` 裡名為 opencodex 的設定，或目前套用中的設定。也可以用 `dispatch.claude_3p.profile` 指定設定檔。
   - 讀到的值放進工人的 `ANTHROPIC_BASE_URL`／`ANTHROPIC_API_KEY`，並移除 `ANTHROPIC_AUTH_TOKEN`，避免改用官方登入。金鑰不會寫進 relay 設定、信件、argv 或 log。
