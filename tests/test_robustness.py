@@ -16,6 +16,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 os.environ["AGENT_RELAY_HOME"] = tempfile.mkdtemp(prefix="agent-relay-test-home-")
+import atexit, shutil  # noqa: E402
+atexit.register(shutil.rmtree, os.environ["AGENT_RELAY_HOME"], ignore_errors=True)
 
 import nostr_adapter_poc as poc  # noqa: E402
 from agent_relay import dispatch, locks, status  # noqa: E402

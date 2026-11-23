@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Never touch the real ~/.agent-relay: every test run gets its own home.
 os.environ["AGENT_RELAY_HOME"] = tempfile.mkdtemp(prefix="agent-relay-test-home-")
+import atexit, shutil  # noqa: E402
+atexit.register(shutil.rmtree, os.environ["AGENT_RELAY_HOME"], ignore_errors=True)
 
 from agent_relay import cli, dispatch, envelope  # noqa: E402
 from test_accept import GOOD_WORKER, AcceptBase, git  # noqa: E402
