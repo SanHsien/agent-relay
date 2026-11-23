@@ -536,7 +536,7 @@ All three switches are opt-in and enforce every security check from the precedin
 
 ```powershell
 python -m agent_relay init --agent commander --clone <store repo> --branch mailbox   # Run once on a new machine
-python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime claude --runtime codex ...]
+python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime claude --runtime codex ...] [--sender hermes ...]
 ```
 
 Creates or repairs the following items in order. Safe to run repeatedly—each step only fills in what is missing:
@@ -545,8 +545,9 @@ Creates or repairs the following items in order. Safe to run repeatedly—each s
 2. Worker home (default `~/.agent-relay-worker`, mailbox `claude-code`) and its `config.json`;
 3. Worker signing keypair;
 4. Mutual trust (`allowed_signers`) between commander and worker;
-5. Commander `accept` defaults;
-6. Both Windows Scheduled Tasks.
+5. Each extra sender named with `--sender` (e.g. an on-duty agent such as `hermes`): its own keypair in the commander home if missing, trusted by the worker, and added to the worker's `dispatch.senders`;
+6. Commander `accept` defaults;
+7. Both Windows Scheduled Tasks.
 
 - **Non-destructive**: only populates missing config keys, preserving any values you customized by hand; reuses existing keys; avoids duplicate lines in `allowed_signers`; re-registers scheduled tasks under the same names.
 - `--auto` also enables `dispatch.default` and `accept.auto` from Section 18.

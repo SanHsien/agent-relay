@@ -66,6 +66,23 @@ class SetupLocalTests(unittest.TestCase):
         self.assertEqual((self.worker / "allowed_signers").read_text(encoding="utf-8"), trust)
         self.assertEqual(json.loads(cfg_path.read_text(encoding="utf-8"))["dispatch"]["max_concurrent"], 1)
 
+    def test_extra_sender_gets_a_key_trust_and_a_senders_entry_once(self):
+        steps = self.run_setup(senders=["hermes"])
+        self.assertTrue((self.commander / "keys" / "hermes_ed25519").is_file())
+        worker = json.loads((self.worker / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(worker["dispatch"]["senders"], ["commander", "hermes"])
+        trust = (self.worker / "allowed_signers").read_text(encoding="utf-8")
+        self.assertIn("hermes ", trust)
+        self.assertIn("dispatch sender added: hermes", steps)
+        # Second run: no new key, no duplicate entry or trust line.
+        key = (self.commander / "keys" / "hermes_ed25519").read_bytes()
+        steps = self.run_setup(senders=["hermes"])
+        self.assertIn("dispatch sender kept: hermes", steps)
+        self.assertEqual((self.commander / "keys" / "hermes_ed25519").read_bytes(), key)
+        self.assertEqual(json.loads((self.worker / "config.json").read_text(encoding="utf-8"))["dispatch"]["senders"],
+                         ["commander", "hermes"])
+        self.assertEqual((self.worker / "allowed_signers").read_text(encoding="utf-8"), trust)
+
     def test_auto_turns_on_the_human_free_settings(self):
         self.run_setup(auto=True)
         worker = json.loads((self.worker / "config.json").read_text(encoding="utf-8"))

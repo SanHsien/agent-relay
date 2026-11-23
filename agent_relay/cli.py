@@ -675,7 +675,7 @@ def cmd_setup_local(args, cfg) -> int:
     try:
         steps = relay_setup.setup_local(config.home(), Path(args.worker_home).expanduser(), args.worker_agent,
                                         args.repo_root or None, args.runtime or None, args.every, args.auto,
-                                        install_tasks=not args.no_tasks)
+                                        install_tasks=not args.no_tasks, senders=args.sender or None)
     except (RuntimeError, signing.SigningError) as exc:
         raise SystemExit(f"error: {exc}") from exc
     _out(args, steps, chr(10).join(steps))
@@ -887,6 +887,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--auto", action="store_true",
                    help="also turn on dispatch.default and accept.auto (no human in the loop, SPEC 18)")
     s.add_argument("--no-tasks", action="store_true", help="do not (re)register the scheduled tasks")
+    s.add_argument("--sender", action="append",
+                   help="extra mailbox allowed to send dispatch tasks (e.g. hermes): key made in the commander "
+                        "home if missing, trusted by the worker, added to dispatch.senders; repeatable")
     s.set_defaults(func=cmd_setup_local)
 
     s = sub.add_parser("inbox", help="list open messages")

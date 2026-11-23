@@ -538,7 +538,7 @@ relay gc [--older-than 14] [--repo <repo> ...] [--apply]
 
 ```powershell
 python -m agent_relay init --agent commander --clone <store repo> --branch mailbox   # 新電腦先做一次
-python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime claude --runtime codex ...]
+python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime claude --runtime codex ...] [--sender hermes ...]
 ```
 
 依序建立或補齊下列項目。可以重複執行，每一步只補缺少的部分：
@@ -547,8 +547,9 @@ python -m agent_relay setup-local [--auto] [--repo-root C:\GitHub] [--runtime cl
 2. 工人 home（預設 `~/.agent-relay-worker`，信箱 `claude-code`）與它的 `config.json`；
 3. 工人的簽章金鑰；
 4. 雙方互相信任；
-5. 指揮者的 `accept` 預設值；
-6. 兩個 Windows 排程。
+5. 每個 `--sender` 指定的額外寄件人（例如值班 agent `hermes`）：在指揮者的 home 補一把它自己的金鑰，讓工人信任這把金鑰，再把它加進工人的 `dispatch.senders`；
+6. 指揮者的 `accept` 預設值；
+7. 兩個 Windows 排程。
 
 - **不覆蓋**：設定只補缺少的鍵，你自己改過的值會保留；已有的金鑰沿用；信任清單不重複寫入；排程用同名重新註冊。
 - `--auto` 會一併打開第 18 節的 `dispatch.default` 與 `accept.auto`。

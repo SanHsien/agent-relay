@@ -60,7 +60,7 @@ def worker_defaults(store: str, agent: str, repo_roots: list[str], runtimes: lis
 
 def setup_local(commander_home: Path, worker_home: Path = DEFAULT_WORKER_HOME, worker_agent: str = "claude-code",
                 repo_roots: list[str] | None = None, runtimes: list[str] | None = None, every: int = 5,
-                auto: bool = False, install_tasks: bool = True) -> list[str]:
+                auto: bool = False, install_tasks: bool = True, senders: list[str] | None = None) -> list[str]:
     """Run every step; returns a log of what was done or already in place."""
     steps: list[str] = []
     commander_home, worker_home = Path(commander_home), Path(worker_home)
@@ -94,6 +94,21 @@ def setup_local(commander_home: Path, worker_home: Path = DEFAULT_WORKER_HOME, w
     signing.trust(worker_home / "allowed_signers", commander, commander_pub)
     signing.trust(commander_home / "allowed_signers", wcfg.get("agent", worker_agent), worker_pub)
     steps.append("trust: worker trusts commander; commander trusts the worker")
+
+    # Extra dispatch senders (e.g. hermes): each signs with its own key kept in the commander
+    # home, the worker trusts that key, and the name joins dispatch.senders. Idempotent.
+    for sender in senders or []:
+        if not sender or sender == commander:
+            continue
+        _, sender_pub = key_for(commander_home, sender)
+        signing.trust(worker_home / "allowed_signers", sender, sender_pub)
+        allowed = wcfg.setdefault("dispatch", {}).setdefault("senders", [])
+        if sender not in allowed:
+            allowed.append(sender)
+            _save(wcfg_path, wcfg)
+            steps.append(f"dispatch sender added: {sender}")
+        else:
+            steps.append(f"dispatch sender kept: {sender}")
 
     accept_defaults = {"accept": {"verify": {"command": "auto", "timeout_minutes": 15}, "repo_roots": repo_roots}}
     if auto:
