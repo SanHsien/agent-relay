@@ -172,7 +172,7 @@ relay send ──寫入 new/──▶ mailboxes/<收件者>/new/<id>.json ──
   - repo 不在 `repo_roots` 底下；
   - 寄件者不在 `senders`。`senders` **沒設或空清單就一律拒絕**；
   - 信件沒有本機信任的簽章（第 13 節；`require_signature` 預設 true）。
-- **只執行真正的 `.exe`**：先找 `executables` 指定的路徑，沒設就找 PATH 上的 `<runtime>.exe`。`.bat`／`.cmd` 外殼一律拒絕：cmd.exe 會重新解析參數，把 prompt 第一個換行之後的內容連同權限旗標一起丟掉，工人就會用使用者的預設權限跑（實際踩過）。
+- **只執行真正的 `.exe`**：先找 `executables` 指定的路徑，沒設就找 PATH 上的 `<runtime>.exe`。Windows 上的 `codex` 例外：沒設 `executables.codex` 時，先用 Codex Desktop 隨 app 更新的最新 CLI（`%LOCALAPPDATA%\OpenAI\Codex\bin\<雜湊>\codex.exe`，取修改時間最新的），找不到才走 PATH；PATH 上的獨立安裝版可能過舊，舊版 0.150.0 會讓所有 gpt-6 模型回 `model_not_found`（2026-11-23 實際踩過）。`.bat`／`.cmd` 外殼一律拒絕：cmd.exe 會重新解析參數，把 prompt 第一個換行之後的內容連同權限旗標一起丟掉，工人就會用使用者的預設權限跑（實際踩過）。
 - claude、codex 的 prompt 從 **stdin** 傳，不放命令列（避開 32K 長度上限與換行問題）。
 - **工人只改檔，不 commit**：claude 工人預設**沒有任何 shell 指令**（claude 在原生 Windows 沒有 shell 沙箱；只要放行「跑測試」，信件就能叫它先寫一支 conftest.py 再執行，等於沒有沙箱地跑任意程式；`git diff --output=` 也能寫到 worktree 外）。codex 工人在自己的 `workspace-write` 沙箱裡，可以跑驗證但寫不到 `.git`。兩者都拿不到 git 自己的目錄。
 - **relay 代為 commit**：工人結束後，relay 在 worktree 跑 `git add -A` 與 `git commit -m "relay: <id>"`，並關掉 hooks（`core.hooksPath` 指向空裝置、`--no-verify`、`core.fsmonitor=false`）。若工人改過 worktree 的 `.git` 指標檔（可能指向自己寫的 hooks），relay 就不 commit，在回信裡註明。

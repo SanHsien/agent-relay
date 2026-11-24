@@ -616,6 +616,44 @@ class ExecutableTests(DispatchBase):
         with self.assertRaises(dispatch.DispatchError):
             dispatch.resolve_executable("claude", cfg)
 
+    def _desktop_bins(self):
+        old = self.dir / "OpenAI" / "Codex" / "bin" / "aaa"
+        new = self.dir / "OpenAI" / "Codex" / "bin" / "bbb"
+        for d in (old, new):
+            d.mkdir(parents=True)
+            (d / "codex.exe").write_bytes(b"")
+        os.utime(old / "codex.exe", (1_000_000, 1_000_000))
+        os.utime(new / "codex.exe", (2_000_000, 2_000_000))
+        (self.dir / "OpenAI" / "Codex" / "bin" / "ccc").mkdir()  # no codex.exe: ignored
+        return new / "codex.exe"
+
+    def test_codex_prefers_newest_desktop_cli_on_windows(self):
+        newest = self._desktop_bins()
+        with mock.patch.object(dispatch.sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.dir)}), \
+                mock.patch.object(dispatch.shutil, "which", return_value=sys.executable):
+            self.assertEqual(dispatch.resolve_executable("codex", {}), str(newest))
+
+    def test_codex_configured_exe_beats_desktop_cli(self):
+        self._desktop_bins()
+        cfg = {"dispatch": {"executables": {"codex": sys.executable}}}
+        with mock.patch.object(dispatch.sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.dir)}):
+            self.assertEqual(dispatch.resolve_executable("codex", cfg), sys.executable)
+
+    def test_codex_falls_back_to_path_without_desktop_cli(self):
+        with mock.patch.object(dispatch.sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.dir / "none")}), \
+                mock.patch.object(dispatch.shutil, "which", return_value=sys.executable):
+            self.assertEqual(dispatch.resolve_executable("codex", {}), sys.executable)
+
+    def test_desktop_cli_not_used_for_other_runtimes(self):
+        self._desktop_bins()
+        with mock.patch.object(dispatch.sys, "platform", "win32"), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": str(self.dir)}), \
+                mock.patch.object(dispatch.shutil, "which", return_value=sys.executable):
+            self.assertEqual(dispatch.resolve_executable("claude", {}), sys.executable)
+
 
 class RunTests(DispatchBase):
     def test_success_commits_in_worktree_and_replies(self):

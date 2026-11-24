@@ -599,10 +599,32 @@ def build_prompt(env: dict, worktree: Path, branch: str, plan: bool, handover: s
     )
 
 
+def _codex_desktop_exe() -> str | None:
+    """Newest Codex Desktop CLI: %LOCALAPPDATA%\\OpenAI\\Codex\\bin\\<hash>\\codex.exe.
+
+    The desktop app updates this CLI; the standalone install under Programs\\OpenAI\\Codex
+    can be stale (0.150.0 rejected every gpt-6 model with model_not_found, 2026-11-23),
+    and the PATH shim that picks the newest one is a .cmd, which resolve_executable refuses.
+    """
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        return None
+    root = Path(base) / "OpenAI" / "Codex" / "bin"
+    try:
+        found = [d / "codex.exe" for d in root.iterdir() if (d / "codex.exe").is_file()]
+    except OSError:
+        return None
+    if not found:
+        return None
+    return str(max(found, key=lambda p: p.stat().st_mtime))
+
+
 def resolve_executable(name: str, cfg: dict) -> str:
     """A real .exe for the runtime. Batch shims are refused: cmd.exe re-parses arguments."""
     configured = ((cfg.get("dispatch") or {}).get("executables") or {}).get(name)
     exe = os.path.expandvars(os.path.expanduser(configured)) if configured else None
+    if not exe and sys.platform == "win32" and name == "codex":
+        exe = _codex_desktop_exe()
     if not exe and sys.platform == "win32":
         exe = shutil.which(name + ".exe")
     exe = exe or shutil.which(name)
